@@ -164,9 +164,17 @@ class Preprocessor:
         """
         working = dataframe.copy()
 
-        surname_name_series = working["runner_id"].apply(split_runner_id)
-        working["surname"] = surname_name_series.apply(lambda pair: pair[0])
-        working["name"] = surname_name_series.apply(lambda pair: pair[1])
+        runner_series = working["runner_id"].astype("string").str.strip()
+
+        splitted = runner_series.str.split("_", n=1, expand=True)
+        working["surname"] = splitted[0].str.strip()
+        working["name"] = splitted[1].str.strip()
+
+        mask_blank = (
+            working["surname"].isna() | (working["surname"] == "") |
+            working["name"].isna() | (working["name"] == "")
+        )
+        working.loc[mask_blank, ["surname", "name"]] = pd.NA
 
         working["approx_birth_year"] = (
             working["year"].astype(int) - working["age"].astype(int)
@@ -186,8 +194,13 @@ class Preprocessor:
 
         if not valid.empty:
             grouped = valid.groupby(["surname", "name", "gender"], sort=False)
+            total_groups = len(grouped)
+            logger.debug(
+                "disambiguate_runners_and_fill_city: %d групп (surname, name, gender)",
+                total_groups,
+            )
 
-            for (surname, name, gender), group in grouped:
+            for index, ((surname, name, gender), group) in enumerate(grouped, start=1):
                 clusters = self._split_into_person_clusters(group)
                 base_runner_id = f"{surname}_{name}"
 
@@ -199,6 +212,13 @@ class Preprocessor:
                 # Мы не можем автоматом заполнить пропуски city одной модой в записях ниже
                 clusters = self._fill_city_in_clusters(clusters, base_runner_id)
                 processed_groups.extend(clusters)
+
+                if index % 1000 == 0:
+                    logger.debug(
+                        "disambiguate_runners_and_fill_city: обработано %d/%d групп",
+                        index,
+                        total_groups,
+                    )
 
         if processed_groups:
             processed_valid = pd.concat(processed_groups, ignore_index=True)
