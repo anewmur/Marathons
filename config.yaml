@@ -1,0 +1,8 @@
+# Конфигурация модели MarathonModel
+
+preprocessing:
+  age_center: 35      # Центр для стандартизации возраста
+  age_scale: 10       # Масштаб для стандартизации: x = (age - center) / scale
+
+validation:
+  year: 2025          # Год для валидации (исключается из обучения)

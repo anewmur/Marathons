@@ -1,0 +1,106 @@
+files:
+- relpath: results_21km КПМ 2017.xls
+  size_bytes: 607744
+  mtime_ns: 1758375976503473800
+- relpath: results_42km БН 2016.xls
+  size_bytes: 1313792
+  mtime_ns: 1758375845380420600
+- relpath: results_42km БН 2017.xls
+  size_bytes: 1530880
+  mtime_ns: 1758375794811809400
+- relpath: results_42km БН 2018.xls
+  size_bytes: 1627136
+  mtime_ns: 1758375739267561700
+- relpath: results_42km БН 2019.xls
+  size_bytes: 2157056
+  mtime_ns: 1758375643797563700
+- relpath: results_42km Дорога жизни 2017.xls
+  size_bytes: 307200
+  mtime_ns: 1764264821101231100
+- relpath: results_42km Дорога жизни 2018.xls
+  size_bytes: 376320
+  mtime_ns: 1764264783244175200
+- relpath: results_42km Дорога жизни 2019.xls
+  size_bytes: 545792
+  mtime_ns: 1764264746171477800
+- relpath: results_42km Дорога жизни 2020.xls
+  size_bytes: 578560
+  mtime_ns: 1764264708110706800
+- relpath: results_42km Дорога жизни 2021.xls
+  size_bytes: 709120
+  mtime_ns: 1764264677240118600
+- relpath: results_42km Дорога жизни 2022.xls
+  size_bytes: 572928
+  mtime_ns: 1764264621479215200
+- relpath: results_42km Дорога жизни 2023.xls
+  size_bytes: 619008
+  mtime_ns: 1764264593459157100
+- relpath: results_42km Дорога жизни 2024.xls
+  size_bytes: 710656
+  mtime_ns: 1764264518494551700
+- relpath: results_42km КМ 2018.xls
+  size_bytes: 591360
+  mtime_ns: 1758376166575868900
+- relpath: results_42km КМ 2019.xls
+  size_bytes: 922624
+  mtime_ns: 1758376224614368000
+- relpath: results_42km КМ 2020.xls
+  size_bytes: 705024
+  mtime_ns: 1758376263586077000
+- relpath: results_42km КМ 2021.xls
+  size_bytes: 983040
+  mtime_ns: 1758376299627805200
+- relpath: results_42km КМ 2022.xls
+  size_bytes: 825856
+  mtime_ns: 1758376337894208700
+- relpath: results_42km КМ 2023.xls
+  size_bytes: 799232
+  mtime_ns: 1758376376943238200
+- relpath: results_42km КМ 2024.xls
+  size_bytes: 1512448
+  mtime_ns: 1758376415384127400
+- relpath: results_42km КМ 2025.xls
+  size_bytes: 3165696
+  mtime_ns: 1758376459330604700
+- relpath: results_42km Пермь 2019.xls
+  size_bytes: 413184
+  mtime_ns: 1764259910993407100
+- relpath: results_42km Пермь 2020.xls
+  size_bytes: 314368
+  mtime_ns: 1764259892300335500
+- relpath: results_42km Пермь 2022.xls
+  size_bytes: 363008
+  mtime_ns: 1764259865857687800
+- relpath: results_42km Пермь 2023.xls
+  size_bytes: 402944
+  mtime_ns: 1764259814744699100
+- relpath: results_42km Пермь 2024.xls
+  size_bytes: 483328
+  mtime_ns: 1764259205025288800
+- relpath: results_42km Пермь 2025.xls
+  size_bytes: 337920
+  mtime_ns: 1764259113431928100
+- relpath: results_42km_male АМ 2020.xls
+  size_bytes: 59392
+  mtime_ns: 1758376933336203600
+- relpath: results_champ_female ЧРМА 2021.xls
+  size_bytes: 28672
+  mtime_ns: 1758377044737639200
+- relpath: results_champ_female ЧРМА 2022.xls
+  size_bytes: 31744
+  mtime_ns: 1758377087646543600
+- relpath: results_female 2022 АМ.xls
+  size_bytes: 33280
+  mtime_ns: 1758377185345829000
+- relpath: results_male 2022 АМ.xls
+  size_bytes: 115200
+  mtime_ns: 1758377158921306400
+- relpath: results_male ЧРМА 2020.xls
+  size_bytes: 33280
+  mtime_ns: 1758376846636655300
+- relpath: results_male ЧРМА 2021.xls
+  size_bytes: 45056
+  mtime_ns: 1758377017575989300
+- relpath: results_male ЧРМА 2022.xls
+  size_bytes: 35328
+  mtime_ns: 1758377106745839500
