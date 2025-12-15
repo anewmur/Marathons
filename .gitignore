@@ -1,1 +1,9 @@
+# created by virtualenv automatically
 /Data/
+.venv/
+*.xls
+*.xlsx
+*.parquet
+logs/*.log
+logs/*.txt
+logs/*.parquet
