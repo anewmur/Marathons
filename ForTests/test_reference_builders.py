@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from reference_builder import TraceReferenceBuilder
+from trace_reference_builder import TraceReferenceBuilder
 from age_reference_builder import AgeReferenceBuilder
 
 

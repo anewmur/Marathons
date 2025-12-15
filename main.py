@@ -13,7 +13,7 @@ import pandas as pd
 
 from data_loader import DataLoader
 from preprocessor import Preprocessor
-from reference_builder import TraceReferenceBuilder
+from trace_reference_builder import TraceReferenceBuilder
 from age_reference_builder import AgeReferenceBuilder
 from time_utils import print_age_references_pretty, analyze_age_group
 
@@ -423,18 +423,18 @@ if __name__ == "__main__":
 
     print("\n" + "="*60)
     print(model.summary())
-
-    print("\n" + "="*60)
-    print("Trace references:")
-    print(model.references.head())
-
-    print("\n" + "="*60)
-    print("Age references (by race):")
-    for race_id, df in model.age_references.items():
-        print(f"\n{race_id}:")
-        print(df.head())
-    df = model.age_references['Белые ночи']
-    print_age_references_pretty(df)
-    analyze_age_group(df, 'F', 23)
+    #
+    # print("\n" + "="*60)
+    # print("Trace references:")
+    # print(model.references.head())
+    #
+    # print("\n" + "="*60)
+    # print("Age references (by race):")
+    # for race_id, df in model.age_references.items():
+    #     print(f"\n{race_id}:")
+    #     print(df.head())
+    # df = model.age_references['Белые ночи']
+    # print_age_references_pretty(df)
+    # analyze_age_group(df, 'F', 23)
 
     # Женское время лучшее 2:28:35 Пермски2 2020

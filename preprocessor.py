@@ -155,34 +155,23 @@ class Preprocessor:
         )
         return filtered
 
-    def disambiguate_runners_and_fill_city(
-        self,
-        dataframe: pd.DataFrame,
-    ) -> pd.DataFrame:
+    def disambiguate_runners_and_fill_city(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         """
         Разукрупнить однофамильцев и заполнить города.
         """
         working = dataframe.copy()
 
-        runner_series = working["runner_id"].astype("string").str.strip()
+        # Быстрый разбор runner_id -> surname/name (без apply)
+        runner_id_series = working["runner_id"].astype("string").str.strip()
+        split_table = runner_id_series.str.split("_", n=1, expand=True)
+        working["surname"] = split_table[0]
+        working["name"] = split_table[1]
 
-        splitted = runner_series.str.split("_", n=1, expand=True)
-        working["surname"] = splitted[0].str.strip()
-        working["name"] = splitted[1].str.strip()
-
-        mask_blank = (
-            working["surname"].isna() | (working["surname"] == "") |
-            working["name"].isna() | (working["name"] == "")
-        )
-        working.loc[mask_blank, ["surname", "name"]] = pd.NA
-
-        working["approx_birth_year"] = (
-            working["year"].astype(int) - working["age"].astype(int)
-        )
+        working["approx_birth_year"] = working["year"].astype(int) - working["age"].astype(int)
 
         mask_valid = working["surname"].notna() & working["name"].notna()
-        valid = working[mask_valid].copy()
-        invalid = working[~mask_valid].copy()
+        valid = working.loc[mask_valid]
+        invalid = working.loc[~mask_valid]
 
         if not invalid.empty:
             logger.warning(
@@ -190,59 +179,182 @@ class Preprocessor:
                 "не участвуют в разукрупнении, но будут возвращены как есть"
             )
 
-        processed_groups: list[pd.DataFrame] = []
+        if valid.empty:
+            combined = pd.concat([valid, invalid], ignore_index=True)
+            for column in ["surname", "name", "approx_birth_year", "city_canon"]:
+                if column in combined.columns:
+                    combined = combined.drop(columns=[column])
+            return combined
 
-        if not valid.empty:
-            grouped = valid.groupby(["surname", "name", "gender"], sort=False)
-            total_groups = len(grouped)
+        # Канонизацию города делай один раз на всём valid (как ты уже сделал ранее)
+        if "city" in valid.columns:
+            city_raw = valid["city"].astype("string").str.strip()
+            valid = valid.copy()
+            valid["city_canon"] = city_raw.map(CLUSTER_CITY_CANONICAL_MAP).fillna(city_raw)
+        else:
+            valid = valid.copy()
+            valid["city_canon"] = pd.NA
+
+        group_cols = ["surname", "name", "gender"]
+
+        # ВАЖНО: фильтруем группы
+        group_sizes = valid.groupby(group_cols, sort=False).size()
+        ambiguous_keys = group_sizes[group_sizes > 1].index
+
+        if len(ambiguous_keys) == 0:
+            processed_valid = valid
+        else:
+            # Быстро выделяем ambiguous по merge (не через apply по строкам)
+            ambiguous_keys_df = pd.DataFrame(list(ambiguous_keys), columns=group_cols)
+
+            ambiguous = valid.merge(ambiguous_keys_df, on=group_cols, how="inner")
+            singletons = valid.merge(ambiguous_keys_df, on=group_cols, how="left", indicator=True)
+            singletons = singletons.loc[singletons["_merge"] == "left_only"].drop(columns=["_merge"])
+
+            processed_groups: list[pd.DataFrame] = []
+
+            grouped = ambiguous.groupby(group_cols, sort=False)
             logger.debug(
-                "disambiguate_runners_and_fill_city: %d групп (surname, name, gender)",
-                total_groups,
+                "disambiguate_runners_and_fill_city: %d групп (surname, name, gender), из них неоднозначных %d",
+                int(group_sizes.shape[0]),
+                int(len(ambiguous_keys)),
             )
 
-            for index, ((surname, name, gender), group) in enumerate(grouped, start=1):
+            processed_count = 0
+            total_groups = int(len(ambiguous_keys))
+
+            for (surname, name, gender), group in grouped:
                 clusters = self._split_into_person_clusters(group)
                 base_runner_id = f"{surname}_{name}"
 
                 clusters = self._assign_runner_ids(clusters, base_runner_id)
-
-                # Мы смотрим на весь кластер "одного человека": все годы, все трассы, все забеги этого runner_id, после разукрупнения по году рождения.
-                # После применения CLUSTER_CITY_CANONICAL_MAP внутри кластера остаётся несколько разных канонических локаций: Москва, Санкт-Петербург и т.п.
-                # география этого кластера неоднородная, заполнение пропусков остановлено.
-                # Мы не можем автоматом заполнить пропуски city одной модой в записях ниже
                 clusters = self._fill_city_in_clusters(clusters, base_runner_id)
+
                 processed_groups.extend(clusters)
 
-                if index % 1000 == 0:
+                processed_count += 1
+                if processed_count % 1000 == 0:
                     logger.debug(
-                        "disambiguate_runners_and_fill_city: обработано %d/%d групп",
-                        index,
+                        "disambiguate_runners_and_fill_city: обработано %d/%d неоднозначных групп",
+                        processed_count,
                         total_groups,
                     )
 
-        if processed_groups:
-            processed_valid = pd.concat(processed_groups, ignore_index=True)
-        else:
-            processed_valid = valid
+            if processed_groups:
+                processed_ambiguous = pd.concat(processed_groups, ignore_index=True)
+            else:
+                processed_ambiguous = ambiguous
+
+            processed_valid = pd.concat([singletons, processed_ambiguous], ignore_index=True)
 
         combined = pd.concat([processed_valid, invalid], ignore_index=True)
 
-        for column in ["surname", "name", "approx_birth_year"]:
+        # Убираем служебные колонки
+        for column in ["surname", "name", "approx_birth_year", "city_canon"]:
             if column in combined.columns:
                 combined = combined.drop(columns=[column])
 
-        original_columns = [
-            column for column in dataframe.columns if column in combined.columns
-        ]
-        extra_columns = [
-            column for column in combined.columns if column not in dataframe.columns
-        ]
+        original_columns = [column for column in dataframe.columns if column in combined.columns]
+        extra_columns = [column for column in combined.columns if column not in dataframe.columns]
         combined = combined[original_columns + extra_columns]
 
-        logger.info(
-            f"После разукрупнения и заполнения городов: {len(combined)} строк"
-        )
+        logger.info(f"После разукрупнения и заполнения городов: {len(combined)} строк")
         return combined
+
+    # def disambiguate_runners_and_fill_city(
+    #     self,
+    #     dataframe: pd.DataFrame,
+    # ) -> pd.DataFrame:
+    #     """
+    #     Разукрупнить однофамильцев и заполнить города.
+    #     """
+    #     working = dataframe.copy()
+    #
+    #     if "city" in working.columns:
+    #         city_raw = working["city"].astype("string").str.strip()
+    #         working["city_canon"] = city_raw.map(CLUSTER_CITY_CANONICAL_MAP).fillna(city_raw)
+    #     else:
+    #         working["city_canon"] = pd.NA
+    #
+    #     runner_series = working["runner_id"].astype("string").str.strip()
+    #
+    #     splitted = runner_series.str.split("_", n=1, expand=True)
+    #     working["surname"] = splitted[0].str.strip()
+    #     working["name"] = splitted[1].str.strip()
+    #
+    #     mask_blank = (
+    #         working["surname"].isna() | (working["surname"] == "") |
+    #         working["name"].isna() | (working["name"] == "")
+    #     )
+    #     working.loc[mask_blank, ["surname", "name"]] = pd.NA
+    #
+    #     working["approx_birth_year"] = (
+    #         working["year"].astype(int) - working["age"].astype(int)
+    #     )
+    #
+    #     mask_valid = working["surname"].notna() & working["name"].notna()
+    #     valid = working[mask_valid].copy()
+    #     invalid = working[~mask_valid].copy()
+    #
+    #     if not invalid.empty:
+    #         logger.warning(
+    #             f"{len(invalid)} строк с некорректным runner_id "
+    #             "не участвуют в разукрупнении, но будут возвращены как есть"
+    #         )
+    #
+    #     processed_groups: list[pd.DataFrame] = []
+    #
+    #     if not valid.empty:
+    #         grouped = valid.groupby(["surname", "name", "gender"], sort=False)
+    #         total_groups = len(grouped)
+    #         logger.debug(
+    #             "disambiguate_runners_and_fill_city: %d групп (surname, name, gender)",
+    #             total_groups,
+    #         )
+    #
+    #         for index, ((surname, name, gender), group) in enumerate(grouped, start=1):
+    #             clusters = self._split_into_person_clusters(group)
+    #             base_runner_id = f"{surname}_{name}"
+    #
+    #             clusters = self._assign_runner_ids(clusters, base_runner_id)
+    #
+    #             # Мы смотрим на весь кластер "одного человека": все годы, все трассы, все забеги этого runner_id, после разукрупнения по году рождения.
+    #             # После применения CLUSTER_CITY_CANONICAL_MAP внутри кластера остаётся несколько разных канонических локаций: Москва, Санкт-Петербург и т.п.
+    #             # география этого кластера неоднородная, заполнение пропусков остановлено.
+    #             # Мы не можем автоматом заполнить пропуски city одной модой в записях ниже
+    #             clusters = self._fill_city_in_clusters(clusters, base_runner_id)
+    #             processed_groups.extend(clusters)
+    #
+    #             if index % 1000 == 0:
+    #                 logger.debug(
+    #                     "disambiguate_runners_and_fill_city: обработано %d/%d групп",
+    #                     index,
+    #                     total_groups,
+    #                 )
+    #
+    #     if processed_groups:
+    #         processed_valid = pd.concat(processed_groups, ignore_index=True)
+    #     else:
+    #         processed_valid = valid
+    #
+    #     combined = pd.concat([processed_valid, invalid], ignore_index=True)
+    #
+    #     for column in ["surname", "name", "approx_birth_year","city_canon"]:
+    #         if column in combined.columns:
+    #             combined = combined.drop(columns=[column])
+    #
+    #     original_columns = [
+    #         column for column in dataframe.columns if column in combined.columns
+    #     ]
+    #     extra_columns = [
+    #         column for column in combined.columns if column not in dataframe.columns
+    #     ]
+    #     combined = combined[original_columns + extra_columns]
+    #
+    #     logger.info(
+    #         f"После разукрупнения и заполнения городов: {len(combined)} строк"
+    #     )
+    #     return combined
 
     def add_transformed_columns(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         """
@@ -412,101 +524,39 @@ class Preprocessor:
             clusters: list[pd.DataFrame],
             base_runner_id: str,
     ) -> list[pd.DataFrame]:
-        """
-        Заполнить city внутри каждого кластера.
-
-        Правило:
-        - если все ненулевые города после приведения к канону совпадают,
-          заполняем пропуски этим каноном и приводим все значения к нему;
-        - если после приведения к канонам остаётся более одного значения,
-          считаем, что это разные города и ничего не меняем, только логируем.
-        """
         updated_clusters: list[pd.DataFrame] = []
 
         for cluster in clusters:
-            if "city" not in cluster.columns:
+            if "city_canon" not in cluster.columns:
                 updated_clusters.append(cluster)
                 continue
 
             cluster_copy = cluster.copy()
 
-            city_series = cluster_copy["city"]
-            non_null_mask = city_series.notna()
-            if not bool(non_null_mask.any()):
+            canon = cluster_copy["city_canon"]
+            non_null = canon.dropna()
+
+            if non_null.empty:
                 updated_clusters.append(cluster_copy)
                 continue
 
-            non_null_cities = city_series.loc[non_null_mask].astype("string").str.strip()
-
-            # Векторная канонизация без lambda
-            canonical_series = non_null_cities.map(CLUSTER_CITY_CANONICAL_MAP).fillna(non_null_cities)
-
-            unique_values = canonical_series.dropna().unique()
+            unique_values = non_null.unique()
             if len(unique_values) == 1:
                 target_city = str(unique_values[0])
 
-                # Векторно: приводим все ненулевые к канону, затем всё к target_city, затем заполняем NaN
-                full_city = city_series.astype("string").str.strip()
-                full_canonical = full_city.map(CLUSTER_CITY_CANONICAL_MAP).fillna(full_city)
-
-                cluster_copy["city"] = full_canonical.fillna(target_city)
-                cluster_copy.loc[:, "city"] = target_city
+                cluster_copy["city_canon"] = canon.fillna(target_city)
+                cluster_copy["city"] = target_city
 
                 updated_clusters.append(cluster_copy)
                 continue
 
-            # Конфликт:
-            # несколько канонических мест внутри кластера одного человека после приведения
-            # городов к каноническим названиям получается более одного значения.
-            num_missing = int(city_series.isna().sum())
+            num_missing = int(cluster_copy["city"].isna().sum()) if "city" in cluster_copy.columns else 0
 
-            if "race_id" in cluster_copy.columns and "year" in cluster_copy.columns:
-                non_null_rows = cluster_copy.loc[non_null_mask, ["city", "race_id", "year"]].copy()
-
-                raw_city = non_null_rows["city"].astype("string").str.strip()
-                canonical_city = raw_city.map(CLUSTER_CITY_CANONICAL_MAP).fillna(raw_city)
-                non_null_rows["canonical_city"] = canonical_city
-
-                # Контекст "race-year" векторно
-                race_part = non_null_rows["race_id"].astype("string")
-                year_part = pd.to_numeric(non_null_rows["year"], errors="coerce").astype("Int64")
-                context_label = race_part + "-" + year_part.astype("string")
-                # где year NaN, label будет "race-<NA>", уберём
-                non_null_rows["context_label"] = context_label.where(year_part.notna(), pd.NA)
-
-                # Собираем контексты по городу (без iterrows)
-                context_rows = non_null_rows.loc[
-                    non_null_rows["context_label"].notna(), ["canonical_city", "context_label"]]
-                if context_rows.empty:
-                    detailed_entries = [f"'{value}'" for value in sorted(non_null_rows["canonical_city"].unique())]
-                else:
-                    grouped_context = (
-                        context_rows.groupby("canonical_city", sort=True)["context_label"]
-                        .unique()
-                        .to_dict()
-                    )
-
-                    detailed_entries: list[str] = []
-                    for city_value in sorted(non_null_rows["canonical_city"].unique()):
-                        contexts = grouped_context.get(city_value, None)
-                        if contexts is None:
-                            detailed_entries.append(f"'{city_value}'")
-                            continue
-                        context_str = ", ".join(sorted(str(item) for item in contexts))
-                        detailed_entries.append(f"'{city_value}'({context_str})")
-
-                detailed_text = ", ".join(detailed_entries)
-                base_message = (
-                    f"Города в кластере {base_runner_id} "
-                    f"не сведены к одному значению: {detailed_text}"
-                )
-            else:
-                raw_unique = sorted(str(value).strip() for value in non_null_cities.unique())
-                base_message = (
-                    f"Города в кластере {base_runner_id} "
-                    f"не сведены к одному значению: {raw_unique}"
-                )
-
+            # конфликт логируем, но ничего не заполняем
+            base_message = (
+                f"Города в кластере {base_runner_id} "
+                f"не сведены к одному значению: {sorted(str(value) for value in unique_values)}"
+            )
             if num_missing > 0:
                 logger.info(f"{base_message}; {num_missing} пропусков city не заполнен")
             else:
