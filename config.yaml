@@ -3,6 +3,10 @@
 preprocessing:
   age_center: 35      # Центр для стандартизации возраста
   age_scale: 10       # Масштаб для стандартизации: x = (age - center) / scale
+  debug_timing: true
+  suspicious_report: true
+  debug_timing_top: 15
+
 
 references:
   top_fraction: 0.05       # Доля лучших финишёров для эталона (топ-5%)

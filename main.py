@@ -15,7 +15,6 @@ from data_loader import DataLoader
 from preprocessor import Preprocessor
 from trace_reference_builder import TraceReferenceBuilder
 from age_reference_builder import AgeReferenceBuilder
-from time_utils import print_age_references_pretty, analyze_age_group
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +185,8 @@ class MarathonModel:
 
         self._steps_completed['preprocess'] = True
         logger.debug(f"После предобработки: {len(self.df_clean)} записей")
+
+
 
         return self
 
@@ -419,10 +420,10 @@ if __name__ == "__main__":
     )
     model.run()
 
-    dump_references_report(model, r"C:\Users\andre\github\Marathons\references_dump.txt")
+    # dump_references_report(model, r"C:\Users\andre\github\Marathons\references_dump.txt")
 
-    print("\n" + "="*60)
-    print(model.summary())
+    # print("\n" + "="*60)
+    # print(model.summary())
     #
     # print("\n" + "="*60)
     # print("Trace references:")
@@ -438,3 +439,55 @@ if __name__ == "__main__":
     # analyze_age_group(df, 'F', 23)
 
     # Женское время лучшее 2:28:35 Пермски2 2020
+
+
+    ###
+    # df = self.df_clean.copy()
+    # runner_id_series = df["runner_id"].astype("string").str.strip()
+    # parts = runner_id_series.str.split("_", n=1, expand=True)
+    # df["surname_part"] = parts[0]
+    # df["name_part"] = parts[1]
+    #
+    # surname_target = "Алексеев"
+    # name_target = "Александр"
+    #
+    # mask_forward = (df["surname_part"] == surname_target) & (df["name_part"].str.startswith(name_target, na=False))
+    # mask_swapped = (df["surname_part"].str.startswith(name_target, na=False)) & (df["name_part"] == surname_target)
+    # mask_runner_prefix = df["runner_id"].astype("string").str.startswith(f"{surname_target}_{name_target}",
+    #                                                                      na=False)
+    #
+    # mask = mask_forward | mask_swapped | mask_runner_prefix
+    # subset = df.loc[mask].copy()
+    #
+    # print("Rows found:", len(subset))
+    # print("runner_id unique:", subset["runner_id"].nunique(dropna=False))
+    # print("gender counts:\n", subset["gender"].value_counts(dropna=False))
+    #
+    # sort_cols = [col for col in ["race_id", "year", "gender", "bib_number", "age", "time_seconds"] if
+    #              col in subset.columns]
+    # subset_sorted = subset.sort_values(sort_cols)
+    #
+    # pd.set_option("display.max_rows", 5000)
+    # pd.set_option("display.max_columns", 200)
+    # pd.set_option("display.width", 200)
+    #
+    # print("\n=== FULL ROWS ===")
+    # print(subset_sorted.to_string(index=False))
+    #
+    # event_cols = ["race_id", "year"]
+    # if all(col in subset.columns for col in event_cols + ["gender"]):
+    #     print("\n=== EVENTS WITH >1 GENDER INSIDE (race_id, year) ===")
+    #     genders_per_event = subset.groupby(event_cols, sort=False)["gender"].nunique(dropna=False)
+    #     suspicious_events = genders_per_event[genders_per_event > 1].reset_index(name="gender_nunique")
+    #     print(suspicious_events.to_string(index=False))
+    #
+    # if all(col in subset.columns for col in event_cols + ["bib_number"]):
+    #     print("\n=== EVENTS WITH >1 BIB INSIDE (race_id, year) ===")
+    #     bibs_per_event = subset.groupby(event_cols, sort=False)["bib_number"].nunique(dropna=False)
+    #     suspicious_bibs = bibs_per_event[bibs_per_event > 1].reset_index(name="bib_nunique")
+    #     print(suspicious_bibs.to_string(index=False))
+    #
+    # # Если хочешь сразу видеть "первичные" поля, которые могли определять gender
+    # maybe_source_cols = [col for col in df.columns if
+    #                      any(token in col.lower() for token in ["category", "sex", "gender", "пол"])]
+    # print("\nPossible source columns:", maybe_source_cols)
