@@ -119,13 +119,13 @@ def analyze_age_group(df: pd.DataFrame, gender: str, age: int) -> None:
     print(f"  {cv:.1f}% от медианы")
     
     if cv < 5:
-        print(f"  ✅ Очень однородная группа!")
+        print(f"Очень однородная группа!")
     elif cv < 10:
-        print(f"  ✅ Однородная группа")
+        print(f"Однородная группа")
     elif cv < 15:
-        print(f"  ⚠️  Умеренный разброс")
+        print(f"! Умеренный разброс")
     else:
-        print(f"  ⚠️  Большой разброс (неоднородная группа)")
+        print(f" !!! Большой разброс (неоднородная группа)")
     
     print(f"{'='*60}\n")
 

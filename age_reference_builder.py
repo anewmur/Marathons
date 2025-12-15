@@ -1,0 +1,188 @@
+"""
+Построение базовых медиан по возрасту для прогнозирования.
+
+AgeReferenceBuilder строит медианы времён по группам (gender, age).
+Используется для построения возрастных кривых и прогнозов.
+
+Важно: этот класс не решает, какие годы/трассы брать.
+Фильтрация делается снаружи перед вызовом build().
+
+Дисперсия медианы оценивается методом bootstrap.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+class AgeReferenceBuilder:
+    """
+    Построение медиан времён по группам (gender, age).
+
+    Attributes:
+        min_group_size: Минимальный размер возрастной группы
+        bootstrap_samples: Число bootstrap-выборок для оценки дисперсии
+        random_seed: Seed для воспроизводимости bootstrap
+    """
+
+    DEFAULT_MIN_GROUP_SIZE: int = 30
+    DEFAULT_BOOTSTRAP_SAMPLES: int = 200
+    DEFAULT_RANDOM_SEED: int = 456
+
+    REQUIRED_COLUMNS: list[str] = ["gender", "age", "time_seconds"]
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """
+        Инициализация из конфигурации.
+
+        Ожидается секция config['age_references'].
+        """
+        age_config = config.get("age_references", {})
+
+        self.min_group_size = int(
+            age_config.get("min_group_size", self.DEFAULT_MIN_GROUP_SIZE)
+        )
+        self.bootstrap_samples = int(
+            age_config.get("bootstrap_samples", self.DEFAULT_BOOTSTRAP_SAMPLES)
+        )
+        self.random_seed = int(
+            age_config.get("random_seed", self.DEFAULT_RANDOM_SEED)
+        )
+
+        self._validate_params()
+
+    def _validate_params(self) -> None:
+        """Проверить корректность параметров."""
+        if self.min_group_size < 1:
+            raise ValueError(
+                f"age_references.min_group_size должен быть >= 1, получено {self.min_group_size}"
+            )
+        if self.bootstrap_samples < 1:
+            raise ValueError(
+                f"age_references.bootstrap_samples должен быть >= 1, получено {self.bootstrap_samples}"
+            )
+
+    def build(self, dataframe: pd.DataFrame) -> pd.DataFrame:
+        """
+        Построить медианы для всех групп (gender, age).
+
+        Args:
+            dataframe: DataFrame с колонками gender, age, time_seconds
+
+        Returns:
+            DataFrame с колонками:
+                - gender
+                - age
+                - median_time (медиана времени в секундах)
+                - median_log (ln медианы)
+                - median_std (bootstrap std медианы)
+                - n_total (размер группы)
+        """
+        self._validate_dataframe(dataframe)
+
+        working = dataframe.copy()
+        working = working[working["time_seconds"].notna()]
+        working = working[working["time_seconds"] > 0]
+
+        if working.empty:
+            logger.warning("AgeReferenceBuilder: нет валидных данных после фильтрации")
+            return self._empty_result()
+
+        groups = working.groupby(["gender", "age"], sort=False)
+
+        rows: list[dict[str, Any]] = []
+        for (gender_value, age_value), group in groups:
+            row = self._build_one_group(str(gender_value), int(age_value), group)
+            if row is not None:
+                rows.append(row)
+
+        if not rows:
+            logger.warning("AgeReferenceBuilder: не удалось построить ни одной медианы")
+            return self._empty_result()
+
+        result = pd.DataFrame(rows)
+
+        # Сортируем по gender, age для удобства
+        result = result.sort_values(["gender", "age"]).reset_index(drop=True)
+
+        logger.info(f"AgeReferenceBuilder: построено {len(result)} возрастных медиан")
+
+        return result
+
+    def _build_one_group(
+        self,
+        gender_value: str,
+        age_value: int,
+        group: pd.DataFrame,
+    ) -> dict[str, Any] | None:
+        """Построить медиану для одной группы (gender, age)."""
+        group_size = len(group)
+
+        if group_size < self.min_group_size:
+            # Не логируем — слишком много мелких групп
+            return None
+
+        times = group["time_seconds"].astype(float).to_numpy()
+        median_time = float(np.median(times))
+
+        # Bootstrap для оценки std медианы
+        median_var = self._bootstrap_median_variance(times)
+        median_std = float(np.sqrt(median_var))
+
+        return {
+            "gender": gender_value,
+            "age": age_value,
+            "median_time": median_time,
+            "median_log": float(np.log(median_time)),
+            "median_std": median_std,
+            "n_total": int(group_size),
+        }
+
+    def _bootstrap_median_variance(self, times: np.ndarray) -> float:
+        """
+        Оценить дисперсию медианы методом bootstrap (векторизованно).
+
+        Генерирует все bootstrap-выборки разом для максимальной скорости.
+        """
+        if self.bootstrap_samples <= 1:
+            return 0.0
+
+        rng = np.random.default_rng(self.random_seed)
+        n = times.size
+
+        # Генерируем ВСЕ индексы разом: матрица (n_bootstrap, n)
+        indices = rng.integers(0, n, size=(self.bootstrap_samples, n))
+
+        # Получаем все bootstrap-выборки разом
+        all_resamples = times[indices]  # shape: (n_bootstrap, n)
+
+        # Медианы всех выборок — векторно по axis=1
+        bootstrap_medians = np.median(all_resamples, axis=1)
+
+        return float(np.var(bootstrap_medians, ddof=1))
+
+    def _validate_dataframe(self, dataframe: pd.DataFrame) -> None:
+        """Проверить входной DataFrame."""
+        if dataframe is None or dataframe.empty:
+            raise ValueError("AgeReferenceBuilder.build: пустой DataFrame")
+
+        missing = [col for col in self.REQUIRED_COLUMNS if col not in dataframe.columns]
+        if missing:
+            raise ValueError(f"AgeReferenceBuilder.build: отсутствуют колонки: {missing}")
+
+    def _empty_result(self) -> pd.DataFrame:
+        """Вернуть пустой DataFrame с правильными колонками."""
+        return pd.DataFrame(columns=[
+            "gender",
+            "age",
+            "median_time",
+            "median_log",
+            "median_std",
+            "n_total",
+        ])

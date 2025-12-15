@@ -53,7 +53,7 @@ def parse_gender_from_category(category: str) -> str | None:
     - 'Ж' в начале или 'ЖЕНЩИН' → 'F'
     
     Args:
-        category: Значение поля Категория (например, "М 23-39", "Женщины")
+        category: Значение поля Категория
         
     Returns:
         'M', 'F' или None если не удалось определить
@@ -99,6 +99,40 @@ def parse_status(status_value: object, time_seconds: float | None) -> str:
     return 'DNF'
 
 
+def split_runner_id(runner_id: str | None) -> tuple[str | None, str | None]:
+    """
+    Разобрать runner_id формата 'Фамилия_Имя' на (surname, name).
+
+    Правила:
+      - если строка пустая или нестроковая → (None, None);
+      - если нет символа '_' → (None, None) (формат неизвестен);
+      - если несколько '_' → всё после первого считаем именем:
+            'Иванов_Иван_Петрович' -> ('Иванов', 'Иван_Петрович');
+      - если после разбиения фамилия или имя пустые → (None, None).
+
+    Returns:
+        (surname, name) или (None, None), если формат нераспознаваем.
+    """
+    if not isinstance(runner_id, str):
+        return None, None
+
+    stripped_value = runner_id.strip()
+    if not stripped_value:
+        return None, None
+
+    if "_" not in stripped_value:
+        return None, None
+
+    parts = stripped_value.split("_")
+    surname_part = parts[0].strip()
+    name_part = "_".join(parts[1:]).strip()
+
+    if not surname_part or not name_part:
+        return None, None
+
+    return surname_part, name_part
+
+
 # ------
 # Пример использования:
 #
@@ -108,23 +142,11 @@ def parse_status(status_value: object, time_seconds: float | None) -> str:
 # time1 = parse_time_to_seconds("02:33:51")  # 9231.0
 # time2 = parse_time_to_seconds("2:33:51")   # 9231.0
 # time3 = parse_time_to_seconds("33:51")     # 2031.0
-# time4 = parse_time_to_seconds("invalid")   # None
-#
-# print(f"02:33:51 = {time1} секунд")
-# print(f"33:51 = {time3} секунд")
 #
 # # Определение пола
-# gender1 = parse_gender_from_category("М 23-39")        # 'M'
-# gender2 = parse_gender_from_category("Женщины 40-49")  # 'F'
-# gender3 = parse_gender_from_category("Unknown")        # None
-#
-# print(f"'М 23-39' → {gender1}")
-# print(f"'Женщины 40-49' → {gender2}")
+# gender1 = parse_gender_from_category("М 23-39")  # 'M'
+# gender2 = parse_gender_from_category("Женщины")  # 'F'
 #
 # # Определение статуса
-# status1 = parse_status(None, 9231.0)     # 'OK'
-# status2 = parse_status('DNF', None)      # 'DNF'
-# status3 = parse_status(None, None)       # 'DNF'
-#
-# print(f"Время есть, статус пуст → {status1}")
-# print(f"Статус DNF → {status2}")
+# status1 = parse_status(None, 9231.0)  # 'OK'
+# status2 = parse_status('DNF', None)   # 'DNF'

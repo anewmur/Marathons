@@ -4,5 +4,18 @@ preprocessing:
   age_center: 35      # Центр для стандартизации возраста
   age_scale: 10       # Масштаб для стандартизации: x = (age - center) / scale
 
+references:
+  top_fraction: 0.05       # Доля лучших финишёров для эталона (топ-5%)
+  trim_fraction: 0.10      # Симметричная обрезка внутри топа
+  min_group_size: 40       # Минимальный размер группы (race_id, gender)
+  min_used_runners: 3      # Минимум наблюдений после top/trim
+  bootstrap_samples: 200   # Число bootstrap-выборок для оценки дисперсии
+  random_seed: 123         # Seed для воспроизводимости
+
+age_references:
+  min_group_size: 30      # Минимальный размер возрастной группы
+  bootstrap_samples: 200  # Число bootstrap-выборок для оценки дисперсии
+  random_seed: 456        # Seed для воспроизводимости
+
 validation:
   year: 2025          # Год для валидации (исключается из обучения)
