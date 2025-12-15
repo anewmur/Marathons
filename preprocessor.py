@@ -219,7 +219,6 @@ class Preprocessor:
                 int(group_sizes.shape[0]),
                 int(len(ambiguous_keys)),
             )
-
             processed_count = 0
             total_groups = int(len(ambiguous_keys))
 
