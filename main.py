@@ -1,17 +1,22 @@
 """
 Прогнозирование времени финиша марафонцев.
-
-Класс MarathonModel управляет пайплайном:
-загрузка → предобработка → эталоны → возрастная модель → прогноз
 """
+from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
-from reporting import dump_references_report
-import yaml
-import pandas as pd
+from typing import Any
 
-from data_loader import DataLoader
+import pandas as pd
+import numpy as np
+import yaml
+import time
+
+from utils.raw_filter import RawFilter
+import DataLoader.data_loader as data_loader_module
+from DataLoader.data_loader import DataLoader
+
 from preprocessor import Preprocessor
 from trace_reference_builder import TraceReferenceBuilder
 from age_reference_builder import AgeReferenceBuilder
@@ -21,387 +26,586 @@ logger = logging.getLogger(__name__)
 
 class MarathonModel:
     """
-    Модель прогнозирования времени финиша марафонцев.
+    Оркестратор пайплайна прогнозирования времени финиша.
+    Последовательность шагов:
+        load_data → validate_raw → add_row_id → preprocess → build_trace_references →
+        build_age_references → fit_age_model → predict
 
-    Attributes:
-        data_path: Путь к папке с Excel файлами
-        validation_year: Год для валидации
-        verbose: Флаг подробного вывода
-        config: Параметры из config.yaml
-        df: Сырые данные после загрузки
-        df_clean: Данные после предобработки
-        references: DataFrame с эталонами трасс (race_id, gender, reference_time, ...)
-        age_references: dict[str, pd.DataFrame] - возрастные эталоны по трассам
+    Гарантирует:
+        - После add_row_id все датафреймы используют row_id как уникальный индекс.
+        - Все шаги логируют rows_in/rows_out + elapsed + ключевые метрики.
+        - Шаги не выполняют I/O кроме как через DataLoader (кэширование).
     """
+
+    data_path: Path
+    validation_year: int
+    verbose: bool
+    config: dict[str, Any]
+
+    df: pd.DataFrame | None                  # сырые данные
+    df_clean: pd.DataFrame | None             # предобработанные данные с row_id
+    trace_references: pd.DataFrame | None
+    age_references: dict[str, pd.DataFrame]
+
+    _data_loader: DataLoader
+    _steps_completed: dict[str, bool]
 
     def __init__(
         self,
-        data_path: str,
-        validation_year: int = 2025,
-        verbose: bool = True
-    ):
+        data_path: str | Path,
+        validation_year: int | None = None,
+        verbose: bool = True,
+    ) -> None:
         """
-        Инициализация модели.
-
-        Args:
-            data_path: Путь к папке с Excel файлами или к файлу
-            validation_year: Год для валидации
-            verbose: Выводить подробные сообщения
+        Инициализирует модель.
+        Input: путь к данным, год валидации, режим verbose.
+        Returns: экземпляр MarathonModel.
+        Does: загружает конфиг, инициализирует внутренние структуры.
         """
         self.data_path = Path(data_path)
-        self.validation_year = validation_year
         self.verbose = verbose
-
-        # Загрузить конфигурацию
         self.config = self._load_config()
 
-        # Компоненты пайплайна
+        if validation_year is None:
+            self.validation_year = int(self.config.get("validation", {}).get("year", 0))
+        else:
+            self.validation_year = int(validation_year)
+
         self._data_loader = DataLoader()
+        logger.info("DataLoader class: %s.%s", self._data_loader.__class__.__module__,
+                    self._data_loader.__class__.__name__)
+        logger.info("DataLoader file: %s", data_loader_module.__file__)
+        logger.info("DataLoader OUTPUT_COLUMNS: %s", getattr(data_loader_module, "OUTPUT_COLUMNS", None))
 
-        # Данные — заполняются по мере выполнения шагов
-        self.df: pd.DataFrame | None = None
-        self.df_clean: pd.DataFrame | None = None
+        self.df = None
+        self.df_clean = None
+        self.trace_references = None
+        self.age_references = {}
 
-        # Флаги выполнения шагов
         self._steps_completed = {
-            'load_data': False,
-            'preprocess': False,
-            'build_references': False,
-            'fit_age_model': False,
+            "load_data": False,
+            "filter_raw": False,
+            "validate_raw": False,
+            "add_row_id": False,
+            "preprocess": False,
+            "build_trace_references": False,
+            "build_age_references": False,
+            "fit_age_model": False,
         }
 
-    def _load_config(self) -> dict:
+    # ------------------------------------------------------------------
+    # config
+    # ------------------------------------------------------------------
+    def _load_config(self) -> dict[str, Any]:
         """
-        Загрузить конфигурацию из config.yaml.
-
-        Returns:
-            Словарь с параметрами
+        Загружает конфигурацию из config.yaml.
+        Input: ---
+        Returns: словарь с конфигурацией (по умолчанию, если файл отсутствует).
+        Does: читает файл или возвращает дефолтные значения.
         """
-        config_path = Path(__file__).parent / 'config.yaml'
-
+        config_path = Path(__file__).parent / "config.yaml"
         if not config_path.exists():
-            logger.warning(
-                "config.yaml не найден, используются значения по умолчанию"
-            )
+            logger.warning("config.yaml не найден, используются значения по умолчанию")
             return {
-                'preprocessing': {'age_center': 35, 'age_scale': 10},
-                'validation': {'year': 2025}
+                "preprocessing": {"age_center": 35, "age_scale": 10},
+                "validation": {"year": 0},
             }
+        with open(config_path, "r", encoding="utf-8") as file_handle:
+            return yaml.safe_load(file_handle)
 
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-
-    def _check_step(self, step_name: str, required_steps: list[str]) -> None:
+    # ------------------------------------------------------------------
+    # utils
+    # ------------------------------------------------------------------
+    def _check_step(self, current: str, required: list[str]) -> None:
         """
-        Проверить что необходимые шаги выполнены.
-
-        Args:
-            step_name: Название текущего шага
-            required_steps: Список требуемых шагов
-
-        Raises:
-            RuntimeError: Требуемый шаг не выполнен
+        Проверяет выполнение требуемых шагов.
+        Input: имя текущего шага и список требуемых.
+        Returns: ничего (или RuntimeError).
+        Does: поднимает исключение, если предыдущие шаги не выполнены.
         """
-        for req in required_steps:
-            if not self._steps_completed.get(req, False):
+        for step_name in required:
+            if not self._steps_completed.get(step_name, False):
                 raise RuntimeError(
-                    f"Шаг '{step_name}' требует выполнения '{req}'. "
-                    f"Сначала вызовите model.{req}()"
+                    f"Шаг '{current}' требует выполнения '{step_name}'. "
+                    f"Сначала вызовите model.{step_name}()"
                 )
 
-    # ==================== ШАГ 1: ЗАГРУЗКА ====================
-
-    def load_data(self) -> 'MarathonModel':
+    def _get_loy_frame(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         """
-        Загрузить данные из Excel файлов.
-
-        После выполнения доступен self.df с колонками:
-        runner_id, race_id, year, gender, age, time_seconds, status, city, bib_number
-
-        Returns:
-            self для цепочки вызовов
+        Возвращает LOY-выборку (исключает validation_year).
+        Input: датафрейм.
+        Returns: копия датафрейма без строк validation_year (если задан).
+        Does: фильтрует по году валидации.
         """
-        logger.debug(f"\n{'='*60}")
-        logger.debug("ШАГ 1: ЗАГРУЗКА ДАННЫХ")
-        logger.debug(f"{'='*60}")
-        logger.debug(f"Источник: {self.data_path}")
+        if self.validation_year > 0:
+            return dataframe[dataframe["year"] != self.validation_year].copy()
+        return dataframe.copy()
 
-        if self.data_path.is_file():
-            raise FileNotFoundError(f"Нужно указать путь до папки: {self.data_path}")
-        elif self.data_path.is_dir():
-            self.df = self._data_loader.load_directory_cached(self.data_path)
-        else:
+    def _log_step(
+        self,
+        step_name: str,
+        rows_in: int,
+        rows_out: int,
+        elapsed_sec: float,
+        extra: str | None = None,
+    ) -> None:
+        """
+        Единое логирование метрик шага.
+        Input: имя шага, строки на входе/выходе, время, опциональная доп. метрика.
+        Returns: ничего.
+        Does: выводит лог в едином формате (если verbose=True).
+        """
+        if not self.verbose:
+            return
+        message = f"{step_name}: rows {rows_in} → {rows_out}, elapsed {elapsed_sec:.2f}s"
+        if extra:
+            message += f", {extra}"
+        logger.info(message)
+
+    def debug_slice(
+        self,
+        df: pd.DataFrame | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Универсальный debug-интерфейс для среза данных.
+        Input: датафрейм (по умолчанию df_clean) и словарь фильтров.
+        Returns: ничего (печатает срез).
+        Does: применяет фильтры и выводит отфильтрованные строки.
+        Supports: точное значение, список/множество, callable, np.ndarray.
+        """
+        if df is None:
+            if self.df_clean is None:
+                logger.warning("df_clean недоступен для debug_slice")
+                return
+            df = self.df_clean
+
+        if not filters:
+            print(df.to_string(index=True))
+            return
+
+        mask = pd.Series(True, index=df.index)
+        for col, val in filters.items():
+            if col not in df.columns:
+                logger.warning(f"Колонка {col} отсутствует в датафрейме")
+                continue
+            if callable(val):
+                mask &= val(df[col])
+            elif isinstance(val, (list, tuple, set)):
+                mask &= df[col].isin(val)
+            elif isinstance(val, np.ndarray):
+                mask &= df[col].isin(val)
+            else:
+                mask &= (df[col] == val)
+
+        sliced = df[mask]
+        logger.debug(f"Debug slice ({len(sliced)} строк из {len(df)}):")
+        logger.debug(sliced.to_string(index=True))
+
+    # ------------------------------------------------------------------
+    # step 1: load and filter
+    # ------------------------------------------------------------------
+    def load_data(self) -> "MarathonModel":
+        """
+        Загружает сырые данные.
+        Input: ---
+        Returns: self.
+        Does: читает директорию через DataLoader.
+        Гарантирует: df не пустой, путь существует.
+        """
+        start_time = time.time()
+        if not self.data_path.exists():
             raise FileNotFoundError(f"Путь не существует: {self.data_path}")
 
-        if self.df.empty:
+        self.df = self._data_loader.load_directory_cached(self.data_path)
+
+        logger.info("df columns: %s", list(self.df.columns))
+
+        expected_columns = {
+            "surname",
+            "name",
+            "race_id",
+            "year",
+            "gender",
+            "age",
+            "time_seconds",
+            "status",
+            "city",
+            "bib_number",
+            "distance_km",
+        }
+        missing_columns = [col for col in expected_columns if col not in self.df.columns]
+        if missing_columns:
+            raise RuntimeError(
+                f"load_data вернул другой контракт. Нет колонок: {missing_columns}. "
+                f"Скорее всего подхвачен старый DataLoader или старый parquet-кэш."
+            )
+
+        if self.df is None or self.df.empty:
             raise ValueError("Не удалось загрузить данные")
 
-        self._steps_completed['load_data'] = True
-        self._print_load_stats()
+        elapsed = time.time() - start_time
+        self._steps_completed["load_data"] = True
+        self._log_step("load_data", rows_in=0, rows_out=len(self.df), elapsed_sec=elapsed)
 
         return self
 
-    def _print_load_stats(self) -> None:
-        """Вывести статистику после загрузки."""
-        if not self.verbose or self.df is None:
-            return
+    def filter_raw(self) -> "MarathonModel":
+        """
+        Фильтрация сырых данных по config.yaml.
+        Input: ---
+        Returns: self.
+        Does: применяет raw_filter из self.config и обновляет self.df.
+        Гарантирует: self.df остаётся DataFrame с теми же колонками, но с подмножеством строк.
+        """
+        self._check_step("filter_raw", ["load_data"])
+        assert self.df is not None
 
-        logger.info(f"Всего записей: {len(self.df)}")
-        logger.info(f"Финишировали (OK): {(self.df['status'] == 'OK').sum()}")
-        logger.info(f"DNF/DNS/DSQ: {(self.df['status'] != 'OK').sum()}")
-        logger.info(f"Уникальных участников: {self.df['runner_id'].nunique()}")
-        logger.info(f"Трасс: {self.df['race_id'].nunique()}")
-        logger.info(f"Годы: {sorted(int(y) for y in self.df['year'].unique())}")
+        start_time = time.time()
+        rows_in = len(self.df)
 
-        gender_counts = self.df.groupby('gender')['runner_id'].count()
-        for gender, count in gender_counts.items():
-            logger.info(f"  {gender}: {count}")
+        raw_filter_config = self.config.get("raw_filter", {})
+        if raw_filter_config is None:
+            raw_filter_config = {}
+        if not isinstance(raw_filter_config, dict):
+            raise ValueError("config.raw_filter должен быть словарём (YAML mapping)")
 
-    # ==================== ШАГ 2: ПРЕДОБРАБОТКА ====================
+        raw_filter = RawFilter()
+        df_filtered, stats = raw_filter.apply(self.df, raw_filter_config)
 
-    def preprocess(self) -> 'MarathonModel':
+        self.df = df_filtered
+
+        elapsed = time.time() - start_time
+        self._steps_completed["filter_raw"] = True
+        self._log_step("filter_raw", rows_in=rows_in, rows_out=stats.rows_out, elapsed_sec=elapsed)
+        return self
+
+    # ------------------------------------------------------------------
+    # step 2: validate raw
+    # ------------------------------------------------------------------
+    def validate_raw(self) -> "MarathonModel":
+        """
+        Валидация сырых данных в одном месте.
+        Input: ---
+        Returns: self.
+        Does: проверяет наличие обязательных колонок и базовые инварианты.
+        Гарантирует: обязательные колонки присутствуют, нет null в ключевых полях,
+        для status='OK' time_seconds заполнен и > 0, df не пустой.
+        """
+        self._check_step("validate_raw", ["load_data"])
+        assert self.df is not None
+
+        start_time = time.time()
+        rows_in = len(self.df)
+
+        required_columns = {
+            "year",
+            "race_id",
+            "surname",
+            "name",
+            "gender",
+            "age",
+            "status",
+            "time_seconds",
+            "city",
+            "bib_number",
+            "distance_km",
+        }
+        missing_columns = [col for col in required_columns if col not in self.df.columns]
+        if missing_columns:
+            raise ValueError(f"Отсутствуют обязательные колонки: {missing_columns}")
+
+        if rows_in == 0:
+            raise ValueError("Пустой датафрейм после загрузки")
+
+        always_non_null = ["year", "race_id", "surname", "gender", "age", "status"]
+        for column_name in always_non_null:
+            if self.df[column_name].isna().any():
+                raise ValueError(f"Null-значения в обязательной колонке: {column_name}")
+
+        # surname не должен быть пустой строкой (после strip)
+        surname_stripped = self.df["surname"].astype(str).str.strip()
+        if (surname_stripped == "").any():
+            raise ValueError("Пустые значения в колонке surname (после strip)")
+
+        # name допускаем пустым (как в DataLoader), но не допускаем NaN
+        if self.df["name"].isna().any():
+            raise ValueError("Null-значения в колонке name")
+
+        # time_seconds может быть NaN/None только если статус не OK
+        mask_ok = self.df["status"] == "OK"
+        if self.df.loc[mask_ok, "time_seconds"].isna().any():
+            raise ValueError("Для status='OK' time_seconds не должен быть пустым")
+
+        # Для OK время должно быть положительным
+        if (self.df.loc[mask_ok, "time_seconds"] <= 0).any():
+            raise ValueError("Для status='OK' time_seconds должен быть > 0")
+
+        elapsed = time.time() - start_time
+        self._steps_completed["validate_raw"] = True
+        self._log_step("validate_raw", rows_in=rows_in, rows_out=rows_in, elapsed_sec=elapsed)
+        return self
+
+    # ------------------------------------------------------------------
+    # step 3: add row_id
+    # ------------------------------------------------------------------
+    def add_row_id(self) -> "MarathonModel":
+        """
+        Добавляет технический row_id как уникальный индекс.
+        Input: ---
+        Returns: self.
+        Does: создаёт индекс row_id от 0 до len-1.
+        Гарантирует: индекс уникальный.
+        """
+        self._check_step("add_row_id", ["validate_raw"])
+        assert self.df is not None
+
+        start_time = time.time()
+        rows_in = len(self.df)
+
+        self.df = self.df.reset_index(drop=True).copy()
+        self.df.insert(0, "row_id", range(rows_in))
+        self.df = self.df.set_index("row_id")
+
+        if not self.df.index.is_unique:
+            raise ValueError("Нарушена уникальность row_id")
+
+        elapsed = time.time() - start_time
+        self._steps_completed["add_row_id"] = True
+        self._log_step("add_row_id", rows_in=rows_in, rows_out=rows_in, elapsed_sec=elapsed)
+        return self
+
+    # ------------------------------------------------------------------
+    # step 4: preprocess
+    # ------------------------------------------------------------------
+    def preprocess(self) -> MarathonModel:
         """
         Предобработка данных.
 
-        Выполняет:
-        - Фильтрацию финишировавших (status='OK')
-        - Разукрупнение однофамильцев по году рождения
-        - Заполнение города внутри кластеров
-        - Добавление Y = ln(time_seconds)
-        - Добавление x = (age - age_center) / age_scale
-        - Удаление дублей
+        Заполняет: self.df_clean
 
-        Returns:
-            self для цепочки вызовов
+        Гарантирует:
+        - Нет NaN и неположительных time_seconds для status='OK' (или для всех строк, если status отсутствует).
+        - Возраст в разумных пределах (10-100).
+        - Уникальность row_id сохранена.
+
+        Returns:self.
         """
-        self._check_step('preprocess', ['load_data'])
 
-        logger.debug(f"\n{'='*60}")
-        logger.debug("ШАГ 2: ПРЕДОБРАБОТКА")
-        logger.debug(f"{'='*60}")
+        self._check_step("preprocess", ["add_row_id"])
+        assert self.df is not None
+
+        start_time = time.time()
+        rows_in = len(self.df)
 
         preprocessor = Preprocessor(self.config)
         self.df_clean = preprocessor.run(self.df)
 
-        self._steps_completed['preprocess'] = True
-        logger.debug(f"После предобработки: {len(self.df_clean)} записей")
+        if self.df_clean is None or self.df_clean.empty:
+            raise ValueError("После предобработки нет данных")
 
+        if "time_seconds" not in self.df_clean.columns:
+            raise ValueError("После предобработки отсутствует колонка time_seconds")
 
-
-        return self
-
-    # ==================== ШАГ 3: ЭТАЛОНЫ ====================
-
-    def build_trace_references(self) -> 'MarathonModel':
-        """
-        Построить эталоны R_{c,g} для каждой пары (трасса, пол).
-
-        Returns:
-            self для цепочки вызовов
-        """
-        self._check_step("build_trace_references", ["load_data", "preprocess"])
-
-        validation_config = self.config.get("validation", {})
-        validation_year = int(validation_config.get("year", 0))
-
-        if validation_year > 0:
-            loy_frame = self.df_clean[self.df_clean["year"] != validation_year].copy()
+        mask_ok: pd.Series | slice
+        if "status" in self.df_clean.columns:
+            mask_ok = self.df_clean["status"] == "OK"
         else:
-            loy_frame = self.df_clean.copy()
+            mask_ok = slice(None)
 
-        builder = TraceReferenceBuilder(self.config)
-        self.references = builder.build(loy_frame)
+        if self.df_clean.loc[mask_ok, "time_seconds"].isna().any():
+            raise ValueError("NaN в time_seconds для status='OK' после предобработки")
+        if (self.df_clean.loc[mask_ok, "time_seconds"] <= 0).any():
+            raise ValueError("Отрицательное или нулевое time_seconds для status='OK' после предобработки")
 
-        self._steps_completed["build_trace_references"] = True
-        if self.verbose:
-            logger.info("Построено эталонов трасс: %d", len(self.references))
+        if "age" in self.df_clean.columns:
+            if ((self.df_clean["age"] < 10) | (self.df_clean["age"] > 100)).any():
+                raise ValueError("Некорректный возраст после предобработки")
+
+        if not self.df_clean.index.is_unique:
+            raise ValueError("Нарушена уникальность row_id после предобработки")
+
+        elapsed = time.time() - start_time
+
+        self._steps_completed["preprocess"] = True
+        self._log_step(
+            "preprocess",
+            rows_in=rows_in,
+            rows_out=len(self.df_clean),
+            elapsed_sec=elapsed,
+        )
 
         return self
+    # ------------------------------------------------------------------
+    # step 5: trace references
+    # ------------------------------------------------------------------
+    def build_trace_references(self) -> "MarathonModel":
+        """
+        Строит эталоны трасс.
+        Input: ---
+        Returns: self.
+        Does: использует TraceReferenceBuilder на LOY-выборке.
+        Гарантирует: уникальность (race_id, gender), положительные медианы.
+        """
+        self._check_step("build_trace_references", ["preprocess"])
+        assert self.df_clean is not None
 
+        start_time = time.time()
+        rows_in = len(self.df_clean)
+
+        loy_frame = self._get_loy_frame(self.df_clean)
+        builder = TraceReferenceBuilder(self.config)
+        self.trace_references = builder.build(loy_frame)
+
+        if self.trace_references is None or self.trace_references.empty:
+            raise ValueError("Не удалось построить эталоны трасс")
+
+        key_cols = ["race_id", "gender"]
+        if self.trace_references[key_cols].duplicated().any():
+            raise ValueError("Дубли в ключе trace_references")
+
+        elapsed = time.time() - start_time
+        groups = self.trace_references[key_cols].drop_duplicates().shape[0]
+        self._steps_completed["build_trace_references"] = True
+        self._log_step(
+            "build_trace_references",
+            rows_in=rows_in,
+            rows_out=len(self.trace_references),
+            elapsed_sec=elapsed,
+            extra=f"groups={groups}",
+        )
+        return self
+
+    # ------------------------------------------------------------------
+    # step 6: age references
+    # ------------------------------------------------------------------
     def build_age_references(self) -> "MarathonModel":
         """
-        Построить возрастные медианы отдельно по каждой трассе.
-
-        После выполнения доступен self.age_references: dict[str, pd.DataFrame]
-        Ключ - название трассы, значение - DataFrame с колонками:
-        gender, age, age_median_time, age_median_log, age_median_var, age_median_std, n_total
+        Строит возрастные таблицы по трассам.
+        Input: ---
+        Returns: self.
+        Does: группирует по race_id и строит таблицы через AgeReferenceBuilder.
         """
-        self._check_step("build_age_references", ["load_data", "preprocess"])
+        self._check_step("build_age_references", ["preprocess"])
+        assert self.df_clean is not None
 
-        validation_config = self.config.get("validation", {})
-        validation_year = int(validation_config.get("year", 0))
+        start_time = time.time()
+        rows_in = len(self.df_clean)
 
-        if validation_year > 0:
-            loy_frame = self.df_clean[self.df_clean["year"] != validation_year].copy()
-        else:
-            loy_frame = self.df_clean.copy()
-
+        loy_frame = self._get_loy_frame(self.df_clean)
         builder = AgeReferenceBuilder(self.config)
-
         references_by_race: dict[str, pd.DataFrame] = {}
 
-        if not loy_frame.empty:
-            for race_id_value, race_group in loy_frame.groupby("race_id", sort=False):
-                race_table = builder.build(race_group)
-
-                if race_table.empty:
-                    continue
-
-                race_table = race_table.rename(columns={
+        for race_id_value, race_group in loy_frame.groupby("race_id", sort=False):
+            table = builder.build(race_group)
+            if table is None or table.empty:
+                continue
+            table = table.rename(
+                columns={
                     "median_time": "age_median_time",
                     "median_log": "age_median_log",
                     "median_std": "age_median_std",
-                }).reset_index(drop=True)
+                }
+            ).reset_index(drop=True)
+            table["age_median_var"] = table["age_median_std"] ** 2
+            references_by_race[str(race_id_value)] = table
 
-                race_table["age_median_var"] = race_table["age_median_std"] ** 2
-
-                references_by_race[str(race_id_value)] = race_table
+        total_rows = sum(len(df) for df in references_by_race.values())
+        elapsed = time.time() - start_time
 
         self.age_references = references_by_race
         self._steps_completed["build_age_references"] = True
-
-        if self.verbose:
-            total_rows = sum(len(dataframe) for dataframe in references_by_race.values())
-            logger.info(
-                "Построено возрастных таблиц: %d трасс, %d строк",
-                len(references_by_race),
-                total_rows
-            )
-
+        self._log_step(
+            "build_age_references",
+            rows_in=rows_in,
+            rows_out=total_rows,
+            elapsed_sec=elapsed,
+            extra=f"races={len(references_by_race)}",
+        )
         return self
 
-    def get_age_references(self, race_id: str) -> pd.DataFrame | None:
+    # ------------------------------------------------------------------
+    # step 7: fit age model
+    # ------------------------------------------------------------------
+    def fit_age_model(self) -> "MarathonModel":
         """
-        Получить возрастные эталоны для конкретной трассы.
-
-        Args:
-            race_id: Название трассы
-        Returns:
-            DataFrame с колонками: gender, age, age_median_time, age_median_log,
+        Обучает возрастную модель (заглушка).
+        Input: ---
+        Returns: self.
+        Does: помечает шаг выполненным (реальная модель пока не реализована).
         """
-        return self.age_references.get(race_id)
-
-    # ==================== ШАГ 4: ВОЗРАСТНАЯ МОДЕЛЬ ====================
-
-    def fit_age_model(self) -> 'MarathonModel':
-        """
-        Обучить возрастную модель (B-сплайны с REML).
-
-        Returns:
-            self для цепочки вызовов
-        """
-        self._check_step('fit_age_model', ['load_data', 'preprocess', 'build_trace_references'])
-
-        logger.debug(f"\n{'='*60}")
-        logger.debug("ШАГ 4: ВОЗРАСТНАЯ МОДЕЛЬ")
-        logger.debug(f"{'='*60}")
-
-        print("TODO: fit_age_model — реализация в age_model.py")
-
-        self._steps_completed['fit_age_model'] = True
-
+        self._check_step(
+            "fit_age_model",
+            ["preprocess", "build_trace_references"],
+        )
+        start_time = time.time()
+        elapsed = time.time() - start_time
+        self._steps_completed["fit_age_model"] = True
+        self._log_step("fit_age_model", rows_in=0, rows_out=0, elapsed_sec=elapsed)
         return self
 
-    # ==================== ПОЛНЫЙ ПАЙПЛАЙН ====================
-
-    def run(self) -> 'MarathonModel':
+    # ------------------------------------------------------------------
+    # pipeline
+    # ------------------------------------------------------------------
+    def run(self) -> "MarathonModel":
         """
-        Выполнить все шаги пайплайна.
-
-        Returns:
-            self для цепочки вызовов
+        Полный пайплайн.
+        Input: ---
+        Returns: self.
+        Does: последовательно выполняет все шаги.
         """
-        self.load_data()
-        self.preprocess()
-        self.build_trace_references()
-        self.build_age_references()
-        self.fit_age_model()
+        return (
+            self.load_data()
+            .filter_raw()
+            .validate_raw()
+            .add_row_id()
+            .preprocess()
+            .build_trace_references()
+            .build_age_references()
+            .fit_age_model()
+        )
 
-        logger.debug(f"\n{'='*60}")
-        logger.debug("ПАЙПЛАЙН ЗАВЕРШЁН")
-        logger.debug(f"{'='*60}")
-
-        return self
-
-    # ==================== ПРОГНОЗИРОВАНИЕ ====================
-
+    # ------------------------------------------------------------------
+    # predict
+    # ------------------------------------------------------------------
     def predict(
         self,
         runner_id: str,
         race_id: str,
         year: int,
-        age: int | None = None
+        age: int | None = None,
     ) -> dict[str, float] | None:
         """
-        Прогноз времени финиша для участника.
-
-        Args:
-            runner_id: Идентификатор участника ("Фамилия_Имя")
-            race_id: Название трассы
-            year: Год забега
-            age: Возраст (если None — берётся из истории)
-
-        Returns:
-            Словарь с median, q05, q95 или None
+        Прогноз (пока заглушка).
+        Input: идентификаторы участника, трассы, год и возраст.
+        Returns: словарь с прогнозом или None.
+        Does: проверяет шаги и возвращает заглушку.
         """
-        self._check_step('predict', ['load_data', 'preprocess', 'build_trace_references', 'fit_age_model'])
-
-        print("TODO: predict — здесь будет прогноз")
-
+        self._check_step("predict", ["preprocess", "build_trace_references"])
         return None
 
-    # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
-
+    # ------------------------------------------------------------------
+    # summary
+    # ------------------------------------------------------------------
     def summary(self) -> str:
         """
-        Текстовое описание состояния модели.
-
-        Returns:
-            Строка с описанием
+        Краткая сводка состояния.
+        Input: ---
+        Returns: строку с информацией о модели и выполненных шагах.
+        Does: формирует текстовый отчёт.
         """
         lines = [
             "MarathonModel Summary",
             "=" * 40,
             f"Data path: {self.data_path}",
             f"Validation year: {self.validation_year}",
-            f"Config: age_center={self.config['preprocessing']['age_center']}, "
-            f"age_scale={self.config['preprocessing']['age_scale']}",
             "",
-            "Steps completed:"
+            "Steps completed:",
         ]
-
-        for step, done in self._steps_completed.items():
-            status = "✓" if done else "✗"
-            lines.append(f"  [{status}] {step}")
-
-        if self.df is not None:
-            lines.extend([
-                "",
-                f"Data loaded: {len(self.df)} records",
-                f"Unique runners: {self.df['runner_id'].nunique()}",
-                f"Races: {self.df['race_id'].nunique()}",
-            ])
-
-        if self.df_clean is not None:
-            lines.append(f"After preprocessing: {len(self.df_clean)} records")
-
-        if hasattr(self, 'references') and self.references is not None:
-            lines.extend([
-                "",
-                f"Trace references: {len(self.references)} rows",
-            ])
-
-        if hasattr(self, 'age_references') and self.age_references:
-            total_rows = sum(len(df) for df in self.age_references.values())
-            lines.extend([
-                "",
-                f"Age references: {len(self.age_references)} races, {total_rows} rows",
-                f"Available races: {', '.join(self.age_references.keys())}",
-            ])
-
+        for step_name, done in self._steps_completed.items():
+            mark = "✓" if done else "✗"
+            lines.append(f" [{mark}] {step_name}")
         return "\n".join(lines)
-
-
 
     def __repr__(self) -> str:
         completed = sum(self._steps_completed.values())
@@ -419,75 +623,5 @@ if __name__ == "__main__":
         verbose=True
     )
     model.run()
+    print(model.summary())
 
-    # dump_references_report(model, r"C:\Users\andre\github\Marathons\references_dump.txt")
-
-    # print("\n" + "="*60)
-    # print(model.summary())
-    #
-    # print("\n" + "="*60)
-    # print("Trace references:")
-    # print(model.references.head())
-    #
-    # print("\n" + "="*60)
-    # print("Age references (by race):")
-    # for race_id, df in model.age_references.items():
-    #     print(f"\n{race_id}:")
-    #     print(df.head())
-    # df = model.age_references['Белые ночи']
-    # print_age_references_pretty(df)
-    # analyze_age_group(df, 'F', 23)
-
-    # Женское время лучшее 2:28:35 Пермски2 2020
-
-
-    ###
-    # df = self.df_clean.copy()
-    # runner_id_series = df["runner_id"].astype("string").str.strip()
-    # parts = runner_id_series.str.split("_", n=1, expand=True)
-    # df["surname_part"] = parts[0]
-    # df["name_part"] = parts[1]
-    #
-    # surname_target = "Алексеев"
-    # name_target = "Александр"
-    #
-    # mask_forward = (df["surname_part"] == surname_target) & (df["name_part"].str.startswith(name_target, na=False))
-    # mask_swapped = (df["surname_part"].str.startswith(name_target, na=False)) & (df["name_part"] == surname_target)
-    # mask_runner_prefix = df["runner_id"].astype("string").str.startswith(f"{surname_target}_{name_target}",
-    #                                                                      na=False)
-    #
-    # mask = mask_forward | mask_swapped | mask_runner_prefix
-    # subset = df.loc[mask].copy()
-    #
-    # print("Rows found:", len(subset))
-    # print("runner_id unique:", subset["runner_id"].nunique(dropna=False))
-    # print("gender counts:\n", subset["gender"].value_counts(dropna=False))
-    #
-    # sort_cols = [col for col in ["race_id", "year", "gender", "bib_number", "age", "time_seconds"] if
-    #              col in subset.columns]
-    # subset_sorted = subset.sort_values(sort_cols)
-    #
-    # pd.set_option("display.max_rows", 5000)
-    # pd.set_option("display.max_columns", 200)
-    # pd.set_option("display.width", 200)
-    #
-    # print("\n=== FULL ROWS ===")
-    # print(subset_sorted.to_string(index=False))
-    #
-    # event_cols = ["race_id", "year"]
-    # if all(col in subset.columns for col in event_cols + ["gender"]):
-    #     print("\n=== EVENTS WITH >1 GENDER INSIDE (race_id, year) ===")
-    #     genders_per_event = subset.groupby(event_cols, sort=False)["gender"].nunique(dropna=False)
-    #     suspicious_events = genders_per_event[genders_per_event > 1].reset_index(name="gender_nunique")
-    #     print(suspicious_events.to_string(index=False))
-    #
-    # if all(col in subset.columns for col in event_cols + ["bib_number"]):
-    #     print("\n=== EVENTS WITH >1 BIB INSIDE (race_id, year) ===")
-    #     bibs_per_event = subset.groupby(event_cols, sort=False)["bib_number"].nunique(dropna=False)
-    #     suspicious_bibs = bibs_per_event[bibs_per_event > 1].reset_index(name="bib_nunique")
-    #     print(suspicious_bibs.to_string(index=False))
-    #
-    # # Если хочешь сразу видеть "первичные" поля, которые могли определять gender
-    # maybe_source_cols = [col for col in df.columns if
-    #                      any(token in col.lower() for token in ["category", "sex", "gender", "пол"])]
-    # print("\nPossible source columns:", maybe_source_cols)

@@ -6,6 +6,8 @@ preprocessing:
   debug_timing: true
   suspicious_report: true
   debug_timing_top: 15
+  write_person_clusters_json: true
+  person_clusters_json_path: "artifacts/person_clusters.json"
 
 
 references:
@@ -23,3 +25,14 @@ age_references:
 
 validation:
   year: 2025          # Год для валидации (исключается из обучения)
+
+raw_filter:
+  only_finishers: true          # True -> оставить только OK
+  allowed_statuses: null         # например ["OK"] или ["OK","DNF"] (если нужно)
+  exclude_statuses: ["DNS","DNF","DSQ","DQ"]  # работает если allowed_statuses is null
+  gender: null                  # "M" / "F" / None
+  distance_km: 42              # 42.195 / 21.0975 / 42 / 21 / null
+  distance_tol_km: 0.5           # допуск на сравнение
+  race_ids: null                 # ["Белые ночи", ...] или null
+  years: null                   # [2016,2017,...] или null
+

@@ -1,36 +1,29 @@
-"""
-Предобработка сырых данных марафонов перед построением модели.
-
-Класс Preprocessor выполняет:
-  1) проверку структуры данных;
-  2) фильтрацию по статусу "OK";
-  3) разукрупнение однофамильцев по приблизительному году рождения
-     и присвоение стабильных runner_id;
-  4) заполнение городов внутри кластеров одного человека;
-  5) добавление преобразованных признаков Y и x;
-  6) удаление дублей.
-"""
-
 from __future__ import annotations
 
 import logging
 import time
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from utils import split_runner_id
-from dictionaries import CLUSTER_CITY_CANONICAL_MAP, REGION_NORMALIZATION_MAP
+import json
+import re
+from pathlib import Path
+from dictionaries import CLUSTER_CITY_CANONICAL_MAP, REGION_NORMALIZATION_MAP, PERSON_TOKEN_CYR_TO_LAT
+
 logger = logging.getLogger(__name__)
 
 
 class Preprocessor:
     """
-    Предобработка сырых данных марафонов.
+    Предобработка сырых данных марафонов перед построением модели.
 
-    Attributes:
-        config: Словарь конфигурации с секцией preprocessing
-        age_center: Центр шкалы возраста для стандартизации
-        age_scale: Масштаб шкалы возраста для стандартизации
+    Класс Preprocessor выполняет:
+      1) проверку структуры данных;
+      2) фильтрацию по статусу "OK";
+      3) разукрупнение однофамильцев по приблизительному году рождения
+         и присвоение стабильных runner_id;
+      4) заполнение городов внутри кластеров одного человека;
+      5) добавление преобразованных признаков Y и x;
+      6) удаление дублей.
     """
 
     REQUIRED_COLUMNS = [
@@ -57,7 +50,6 @@ class Preprocessor:
             self.age_scale = float(preprocessing_config.get("age_scale", 0))
             self.debug_timing = bool(preprocessing_config.get("debug_timing", False))
             self.debug_timing_top = int(preprocessing_config.get("debug_timing_top", 15))
-
         except KeyError as error:
             raise KeyError(
                 "В config['preprocessing'] должны быть заданы "
@@ -89,8 +81,6 @@ class Preprocessor:
         processed = self.disambiguate_runners_and_fill_city(filtered)
         step_end = time.perf_counter()
         print(f"disambiguate_runners_and_fill_city: {step_end - step_start:.6f} s")
-
-        processed = self.disambiguate_same_event_by_bib(processed)
 
         if bool(self.config.get("preprocessing", {}).get("suspicious_report", False)):
             report = self.analyze_suspicious(processed)
@@ -162,23 +152,29 @@ class Preprocessor:
         return filtered
 
     def disambiguate_runners_and_fill_city(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        working = dataframe.copy()
-
+        """
+        Разукрупнить однофамильцев и заполнить города.
+        Ключ группы: (surname, name) без учёта gender.
+        Шаги внутри (surname, name):
+          1) gender -> к большинству; если большинства нет, выбрасываем всю группу;
+          2) делим по approx_birth_year (year - age), если диапазон >= 2;
+          3) страховка: внутри (race_id, year, surname, name) при нескольких bib_number
+             выделяем отдельные под-кластеры по bib_number;
+          4) город: заполняем только пропуски и только если в финальном кластере город единственный.
+        Пишем JSON по финальным кластерам (опционально).
+        """
         t_total_start = time.perf_counter()
 
         t0 = time.perf_counter()
+        working = dataframe.copy()
         runner_id_series = working["runner_id"].astype("string").str.strip()
         split_table = runner_id_series.str.split("_", n=1, expand=True)
-        working["surname"] = split_table[0]
-        working["name"] = split_table[1]
-        working["approx_birth_year"] = working["year"].astype(int) - working["age"].astype(int)
+        working["surname_raw"] = split_table[0]
+        working["name_raw"] = split_table[1]
+        mask_valid = working["surname_raw"].notna() & working["name_raw"].notna()
+        valid = working.loc[mask_valid].copy()
+        invalid = working.loc[~mask_valid].copy()
         t_parse = time.perf_counter() - t0
-
-        t0 = time.perf_counter()
-        mask_valid = working["surname"].notna() & working["name"].notna()
-        valid = working.loc[mask_valid]
-        invalid = working.loc[~mask_valid]
-        t_split_valid = time.perf_counter() - t0
 
         if not invalid.empty:
             logger.warning(
@@ -188,255 +184,354 @@ class Preprocessor:
 
         if valid.empty:
             combined = pd.concat([valid, invalid], ignore_index=True)
-            for column in ["surname", "name", "approx_birth_year", "city_canon"]:
-                if column in combined.columns:
-                    combined = combined.drop(columns=[column])
-            return combined
+            return self._drop_service_columns(combined, dataframe)
+
+        t0 = time.perf_counter()
+        valid["name_base"] = valid["name_raw"].astype("string").str.replace(r"_\d+$", "", regex=True)
+        valid["surname_key"] = self._person_token_to_key_vectorized(valid["surname_raw"])
+        valid["name_key"] = self._person_token_to_key_vectorized(valid["name_base"])
+        valid["approx_birth_year"] = valid["year"].astype(int) - valid["age"].astype(int)
+        t_keys = time.perf_counter() - t0
 
         t0 = time.perf_counter()
         if "city" in valid.columns:
             city_raw = valid["city"].astype("string").str.strip()
-            valid = valid.copy()
-            valid["city_canon"] = city_raw.map(CLUSTER_CITY_CANONICAL_MAP).fillna(city_raw)
+            city_raw = city_raw.replace({"": pd.NA, "None": pd.NA})
+            city_canon = city_raw.map(CLUSTER_CITY_CANONICAL_MAP).fillna(city_raw)
+            city_norm = city_canon.map(REGION_NORMALIZATION_MAP).fillna(city_canon)
+            valid["city_norm"] = city_norm
         else:
-            valid = valid.copy()
-            valid["city_canon"] = pd.NA
+            valid["city_norm"] = pd.NA
         t_city_canon = time.perf_counter() - t0
 
-        report_flag = bool(self.config.get("preprocessing", {}).get("suspicious_report", False))
-        if report_flag:
-            self.build_suspicious_report(valid)
-
-        group_cols = ["surname", "name", "gender"]
-
         t0 = time.perf_counter()
-        group_sizes = valid.groupby(group_cols, sort=False).size()
-        ambiguous_keys = group_sizes[group_sizes > 1].index
-        t_group_sizes = time.perf_counter() - t0
+        group_columns = ["surname_key", "name_key"]
+        group_sizes = valid.groupby(group_columns, sort=False).size()
+        logger.debug(
+            "disambiguate_runners_and_fill_city: %d групп (surname, name), из них неоднозначных %d",
+            int(group_sizes.shape[0]),
+            int((group_sizes > 1).sum()),
+        )
+        group_to_index = valid.groupby(group_columns, sort=False).groups
+        t_groupby = time.perf_counter() - t0
 
-        if len(ambiguous_keys) == 0:
-            processed_valid = valid
-            t_merges = 0.0
-            t_groupby = 0.0
-            t_loop = 0.0
-        else:
-            t0 = time.perf_counter()
-            ambiguous_keys_df = pd.DataFrame(list(ambiguous_keys), columns=group_cols)
+        dropped_indexes: list[int] = []
+        cluster_records: list[dict[str, object]] = []
+
+        # Агрегаты времени
+        split_time = 0.0
+        assign_time = 0.0
+        fill_time = 0.0
+        slow: list[tuple[float, str, str, int]] = []
+
+        t_loop_start = time.perf_counter()
+        for (surname_key, name_key), group_index in group_to_index.items():
+            if len(group_index) == 1:
+                continue
+
+            t_group_start = time.perf_counter()
+
+            group_frame = valid.loc[group_index]
+
+            group_majority_gender = self._majority_gender(group_frame["gender"])
+            if group_majority_gender is None:
+                dropped_indexes.extend(list(group_index))
+                continue
+
+            valid.loc[group_index, "gender"] = group_majority_gender
+
+            surname_display = self._select_display_token(group_frame["surname_raw"])
+            name_display = self._select_display_token(group_frame["name_base"])
+            base_runner_id = f"{surname_display}_{name_display}"
 
             t1 = time.perf_counter()
-            ambiguous = valid.merge(ambiguous_keys_df, on=group_cols, how="inner")
-            t_merge_amb = time.perf_counter() - t1
+            birth_clusters = self._split_by_birth_year(group_frame, group_index)
+            split_time += time.perf_counter() - t1
 
-            t1 = time.perf_counter()
-            singletons = valid.merge(ambiguous_keys_df, on=group_cols, how="left", indicator=True)
-            singletons = singletons.loc[singletons["_merge"] == "left_only"].drop(columns=["_merge"])
-            t_merge_sing = time.perf_counter() - t1
-            t_merges = time.perf_counter() - t0
+            final_clusters: list[dict[str, object]] = []
+            for birth_cluster_index in birth_clusters:
+                bib_clusters = self._split_by_multi_bib_events(valid, birth_cluster_index)
+                for bib_cluster_index in bib_clusters:
+                    cluster_stat = self._cluster_stats(valid, bib_cluster_index)
+                    cluster_stat["index"] = bib_cluster_index
+                    cluster_stat["base_runner_id"] = base_runner_id
+                    final_clusters.append(cluster_stat)
 
-            t0 = time.perf_counter()
-            grouped = ambiguous.groupby(group_cols, sort=False)
-            total_groups = int(len(ambiguous_keys))
-            t_groupby = time.perf_counter() - t0
+            if not final_clusters:
+                continue
 
-            logger.debug(
-                "disambiguate_runners_and_fill_city: %d групп (surname, name, gender), из них неоднозначных %d",
-                int(group_sizes.shape[0]),
-                int(len(ambiguous_keys)),
-            )
+            final_clusters_sorted = sorted(final_clusters, key=self._cluster_sort_key)
 
-            processed_groups: list[pd.DataFrame] = []
-            processed_count = 0
+            suffix_counter = 0
+            t_assign_start = time.perf_counter()
+            for cluster_item in final_clusters_sorted:
+                suffix_counter += 1
+                assigned_runner_id = base_runner_id if suffix_counter == 1 else f"{base_runner_id}_{suffix_counter}"
+                cluster_index = cluster_item["index"]
+                valid.loc[cluster_index, "runner_id"] = assigned_runner_id
 
-            # агрегаты времени по внутренним функциям
-            split_time = 0.0
-            assign_time = 0.0
-            fill_time = 0.0
-            concat_clusters_rows = 0
-            concat_clusters_count = 0
+                t_fill_start = time.perf_counter()
+                self._fill_city_within_cluster(valid, cluster_index)
+                fill_time += time.perf_counter() - t_fill_start
 
-            # топ медленных групп
-            slow: list[tuple[float, str, str, str, int]] = []
+                record = self._cluster_record(
+                    surname_key=surname_key,
+                    name_key=name_key,
+                    base_runner_id=base_runner_id,
+                    assigned_runner_id=assigned_runner_id,
+                    group_majority_gender=group_majority_gender,
+                    cluster_item=cluster_item,
+                )
+                cluster_records.append(record)
+            assign_time += time.perf_counter() - t_assign_start
 
-            t_loop_start = time.perf_counter()
-            for (surname, name, gender), group in grouped:
-                t_group_start = time.perf_counter()
+            t_group_elapsed = time.perf_counter() - t_group_start
+            if self.debug_timing:
+                if len(slow) < self.debug_timing_top:
+                    slow.append((t_group_elapsed, str(surname_key), str(name_key), int(len(group_index))))
+                else:
+                    # Замена худшего
+                    min_idx = min(range(len(slow)), key=lambda i: slow[i][0])
+                    if t_group_elapsed > slow[min_idx][0]:
+                        slow[min_idx] = (t_group_elapsed, str(surname_key), str(name_key), int(len(group_index)))
 
-                t1 = time.perf_counter()
-                clusters = self._split_into_person_clusters(group)
-                split_time += time.perf_counter() - t1
+        t_loop = time.perf_counter() - t_loop_start
 
-                base_runner_id = f"{surname}_{name}"
+        if dropped_indexes:
+            valid = valid.drop(index=pd.Index(dropped_indexes))
 
-                t1 = time.perf_counter()
-                clusters = self._assign_runner_ids(clusters, base_runner_id)
-                assign_time += time.perf_counter() - t1
-
-                t1 = time.perf_counter()
-                clusters = self._fill_city_in_clusters(clusters, base_runner_id)
-                fill_time += time.perf_counter() - t1
-
-                for cluster_frame in clusters:
-                    concat_clusters_rows += int(len(cluster_frame))
-                concat_clusters_count += int(len(clusters))
-
-                processed_groups.extend(clusters)
-
-                t_group_elapsed = time.perf_counter() - t_group_start
-                if self.debug_timing:
-                    if len(slow) < self.debug_timing_top:
-                        slow.append((t_group_elapsed, str(surname), str(name), str(gender), int(len(group))))
-                    else:
-                        worst_index = 0
-                        worst_value = slow[0][0]
-                        for idx, item in enumerate(slow):
-                            if item[0] > worst_value:
-                                worst_value = item[0]
-                                worst_index = idx
-                        if t_group_elapsed > worst_value:
-                            slow[worst_index] = (t_group_elapsed, str(surname), str(name), str(gender), int(len(group)))
-
-                processed_count += 1
-                if processed_count % 1000 == 0:
-                    logger.debug(
-                        "disambiguate_runners_and_fill_city: обработано %d/%d неоднозначных групп",
-                        processed_count,
-                        total_groups,
-                    )
-
-            t_loop = time.perf_counter() - t_loop_start
-
-            t0 = time.perf_counter()
-            if processed_groups:
-                processed_ambiguous = pd.concat(processed_groups, ignore_index=True)
-            else:
-                processed_ambiguous = ambiguous
-            t_concat_processed = time.perf_counter() - t0
-
-            t0 = time.perf_counter()
-            processed_valid = pd.concat([singletons, processed_ambiguous], ignore_index=True)
-            t_concat_valid = time.perf_counter() - t0
+        self._maybe_write_cluster_json(cluster_records)
 
         t0 = time.perf_counter()
-        combined = pd.concat([processed_valid, invalid], ignore_index=True)
-        for column in ["surname", "name", "approx_birth_year", "city_canon"]:
-            if column in combined.columns:
-                combined = combined.drop(columns=[column])
-        original_columns = [column for column in dataframe.columns if column in combined.columns]
-        extra_columns = [column for column in combined.columns if column not in dataframe.columns]
-        combined = combined[original_columns + extra_columns]
+        combined = pd.concat([valid, invalid], ignore_index=True)
+        combined = self._drop_service_columns(combined, dataframe)
         t_finalize = time.perf_counter() - t0
 
         t_total = time.perf_counter() - t_total_start
 
         if self.debug_timing:
             logger.warning(
-                "TIMING disambiguate: total=%.3fs parse=%.3fs split_valid=%.3fs city_canon=%.3fs "
-                "group_sizes=%.3fs merges=%.3fs groupby=%.3fs loop=%.3fs finalize=%.3fs",
-                t_total, t_parse, t_split_valid, t_city_canon,
-                t_group_sizes, t_merges, t_groupby, t_loop, t_finalize,
+                "TIMING disambiguate: total=%.3fs parse=%.3fs keys=%.3fs city_canon=%.3fs "
+                "groupby=%.3fs loop=%.3fs finalize=%.3fs",
+                t_total, t_parse, t_keys, t_city_canon,
+                t_groupby, t_loop, t_finalize,
             )
-            if len(ambiguous_keys) > 0:
+            logger.warning(
+                "TIMING details: split_birth=%.3fs assign_ids=%.3fs fill_city=%.3fs",
+                split_time, assign_time, fill_time,
+            )
+            slow_sorted = sorted(slow, key=lambda item: item[0], reverse=True)
+            for elapsed, surname_key_value, name_key_value, group_len in slow_sorted:
                 logger.warning(
-                    "TIMING details: merge_amb=%.3fs merge_singletons=%.3fs "
-                    "concat_processed=%.3fs concat_valid=%.3fs "
-                    "split_clusters=%.3fs assign_ids=%.3fs fill_city=%.3fs "
-                    "clusters_count=%d clusters_rows=%d",
-                    t_merge_amb, t_merge_sing,
-                    t_concat_processed, t_concat_valid,
-                    split_time, assign_time, fill_time,
-                    int(concat_clusters_count), int(concat_clusters_rows),
+                    "SLOW group: %.4fs size=%d key=%s_%s",
+                    elapsed, int(group_len), surname_key_value, name_key_value,
                 )
-                slow_sorted = sorted(slow, key=lambda item: item[0], reverse=True)
-                for elapsed, surname_value, name_value, gender_value, group_len in slow_sorted:
-                    logger.warning(
-                        "SLOW group: %.4fs size=%d key=%s_%s gender=%s",
-                        elapsed, int(group_len), surname_value, name_value, gender_value,
-                    )
 
         logger.info("После разукрупнения и заполнения городов: %d строк", int(len(combined)))
         return combined
 
-    def build_suspicious_report(self, dataframe: pd.DataFrame) -> dict[str, object]:
-        working = dataframe.copy()
+    def _person_token_to_key_vectorized(self, series: pd.Series) -> pd.Series:
+        """
+        Векторизованная версия _person_token_to_key для ускорения.
+        """
+        s = series.astype(str).str.strip().str.lower().str.replace('ё', 'е')
+        is_cyr = s.str.contains(r'[а-яё]', regex=True)
 
-        runner_id_series = working["runner_id"].astype("string").str.strip()
-        split_table = runner_id_series.str.split("_", n=1, expand=True)
-        working["surname"] = split_table[0]
-        working["name"] = split_table[1]
-        working["approx_birth_year"] = working["year"].astype(int) - working["age"].astype(int)
 
-        mask_valid = working["surname"].notna() & working["name"].notna()
-        valid = working.loc[mask_valid].copy()
 
-        city_raw = valid["city"].astype("string").str.strip() if "city" in valid.columns else pd.Series(pd.NA,
-                                                                                                        index=valid.index)
-        valid["city_canon"] = city_raw.map(CLUSTER_CITY_CANONICAL_MAP).fillna(city_raw)
+        s_cyr = s[is_cyr].str.translate(PERSON_TOKEN_CYR_TO_LAT)
+        s_cyr = s_cyr.str.replace('[^a-z]', '', regex=True).str.replace('x', 'ks').str.replace('ye', 'e').str.replace(
+            'yo', 'e')
 
-        group_cols = ["surname", "name", "gender"]
+        s_non_cyr = s[~is_cyr]
+        s_non_cyr = s_non_cyr.str.replace('[^a-z]', '', regex=True).str.replace('x', 'ks').str.replace('ye',
+                                                                                                       'e').str.replace(
+            'yo', 'e')
 
-        # Тип 2: разброс года рождения
-        birth_stats = valid.groupby(group_cols, sort=False)["approx_birth_year"].agg(
-            group_size="size",
-            birth_year_min="min",
-            birth_year_max="max",
-            birth_year_nunique="nunique",
-        )
-        birth_stats["birth_year_range"] = birth_stats["birth_year_max"] - birth_stats["birth_year_min"]
-        suspicious_birth = birth_stats[birth_stats["birth_year_range"] >= 3].sort_values(
-            ["birth_year_range", "group_size"], ascending=[False, False]
-        )
+        result = pd.Series(index=series.index, dtype=str)
+        result[is_cyr] = s_cyr
+        result[~is_cyr] = s_non_cyr
+        result = result.fillna('')
+        return result
 
-        # Тип 3: конфликт города (слабый)
-        city_stats = valid.groupby(group_cols, sort=False)["city_canon"].nunique(dropna=True).to_frame("city_nunique")
-        suspicious_city = city_stats[city_stats["city_nunique"] >= 2].sort_values("city_nunique", ascending=False)
+    def _drop_service_columns(self, combined: pd.DataFrame, original: pd.DataFrame) -> pd.DataFrame:
+        service_columns = [
+            "surname_raw",
+            "name_raw",
+            "name_base",
+            "surname_key",
+            "name_key",
+            "approx_birth_year",
+            "city_norm",
+        ]
+        combined = combined.drop(columns=service_columns, errors='ignore')
+        original_columns = [column for column in original.columns if column in combined.columns]
+        extra_columns = [column for column in combined.columns if column not in original.columns]
+        combined = combined[original_columns + extra_columns]
+        return combined
 
-        # Тип 1: дубль в одном забеге (жёстко)
-        event_cols = group_cols + ["race_id", "year"]
-        event_sizes = valid.groupby(event_cols, sort=False).size().to_frame("event_count")
-        event_multi = event_sizes[event_sizes["event_count"] >= 2].reset_index()
+    def _select_display_token(self, series: pd.Series) -> str:
+        cleaned = series.astype("string").str.strip()
+        cleaned = cleaned.replace({"": pd.NA, "None": pd.NA}).dropna()
+        if cleaned.empty:
+            return "Unknown"
+        counts = cleaned.value_counts()
+        return str(counts.index[0])
 
-        if event_multi.empty:
-            suspicious_event = valid.iloc[0:0].copy()
-        else:
-            event_multi = event_multi[event_cols]
-            candidates = valid.merge(event_multi, on=event_cols, how="inner")
+    def _majority_gender(self, gender_series: pd.Series) -> str | None:
+        cleaned = gender_series.astype("string").str.strip()
+        cleaned = cleaned.replace({"": pd.NA, "None": pd.NA}).dropna()
+        if cleaned.empty:
+            return None
+        counts = cleaned.value_counts()
+        if counts.shape[0] == 1:
+            return str(counts.index[0])
+        top_count = int(counts.iloc[0])
+        second_count = int(counts.iloc[1]) if len(counts) > 1 else 0
+        if top_count == second_count:
+            return None
+        return str(counts.index[0])
 
-            # “не одинаковые записи” внутри одного (ФИО, пол, трасса, год)
-            compare_cols = ["age", "time_seconds", "bib_number", "city_canon"]
-            nunique_inside = candidates.groupby(event_cols, sort=False)[compare_cols].nunique(dropna=False)
-            conflict_mask = (
-                    (nunique_inside["age"] >= 2)
-                    | (nunique_inside["time_seconds"] >= 2)
-                    | (nunique_inside["bib_number"] >= 2)
-                    | (nunique_inside["city_canon"] >= 2)
-            )
-            conflict_keys = nunique_inside.loc[conflict_mask].reset_index()[event_cols]
-            suspicious_event = candidates.merge(conflict_keys, on=event_cols, how="inner")
+    def _split_by_birth_year(self, group_frame: pd.DataFrame, group_index: pd.Index) -> list[pd.Index]:
+        approx_birth_year = group_frame["approx_birth_year"].dropna()
+        if approx_birth_year.empty:
+            return [group_index]
+        min_year = int(approx_birth_year.min())
+        max_year = int(approx_birth_year.max())
+        if (max_year - min_year) < 2:
+            return [group_index]
+        indexes_left: list[pd.Index] = [group_index]
+        clusters: list[pd.Index] = []
+        while indexes_left:
+            current_index = indexes_left.pop()
+            current_years = group_frame.loc[current_index, "approx_birth_year"].dropna()
+            if current_years.empty:
+                clusters.append(current_index)
+                continue
+            min_current = int(current_years.min())
+            max_current = int(current_years.max())
+            if (max_current - min_current) < 2:
+                clusters.append(current_index)
+                continue
+            mode_year = int(current_years.value_counts().index[0])
+            close_mask = (current_years - mode_year).abs() <= 1
+            close_index = current_years.index[close_mask]
+            far_index = current_years.index[~close_mask]
+            clusters.append(pd.Index(close_index))
+            if len(far_index) > 0:
+                indexes_left.append(pd.Index(far_index))
+        return clusters
 
-        # Итоги
-        report = {}
-        report["counts"] = {
-            "valid_rows": int(len(valid)),
-            "groups_total": int(valid.groupby(group_cols, sort=False).ngroups),
-            "suspicious_birth_groups": int(len(suspicious_birth)),
-            "suspicious_city_groups": int(len(suspicious_city)),
-            "suspicious_event_groups": int(suspicious_event.groupby(event_cols, sort=False).ngroups),
-        }
+    def _split_by_multi_bib_events(self, dataframe: pd.DataFrame, cluster_index: pd.Index) -> list[pd.Index]:
+        cluster_frame = dataframe.loc[cluster_index]
+        group_columns = ["race_id", "year"]
+        event_bib_nunique = cluster_frame.groupby(group_columns, sort=False)["bib_number"].nunique(dropna=True)
+        multi_bib_events = event_bib_nunique[event_bib_nunique > 1]
+        if multi_bib_events.empty:
+            return [cluster_index]
+        remaining_indexes = set(cluster_index.tolist())
+        output_clusters: list[pd.Index] = []
+        for (race_id, year), _ in multi_bib_events.items():
+            event_mask = (cluster_frame["race_id"] == race_id) & (cluster_frame["year"] == year)
+            event_index = cluster_frame.index[event_mask]
+            event_bib = dataframe.loc[event_index, "bib_number"]
+            event_bib_non_na = event_bib.dropna().unique().tolist()
+            for bib_value in sorted(event_bib_non_na):
+                bib_mask = event_bib == bib_value
+                bib_index = event_index[bib_mask]
+                output_clusters.append(pd.Index(bib_index))
+                for row_index in bib_index.tolist():
+                    if row_index in remaining_indexes:
+                        remaining_indexes.remove(row_index)
+            missing_mask = event_bib.isna()
+            missing_index = event_index[missing_mask]
+            if len(missing_index) > 0:
+                output_clusters.append(pd.Index(missing_index))
+                for row_index in missing_index.tolist():
+                    if row_index in remaining_indexes:
+                        remaining_indexes.remove(row_index)
+        if remaining_indexes:
+            output_clusters.append(pd.Index(sorted(remaining_indexes)))
+        return output_clusters
 
-        # Примеры для ручной проверки
-        report["examples_birth_groups"] = suspicious_birth.head(20).reset_index()
-        report["examples_city_groups"] = suspicious_city.head(20).reset_index()
+    def _cluster_stats(self, dataframe: pd.DataFrame, cluster_index: pd.Index) -> dict[str, object]:
+        cluster_frame = dataframe.loc[cluster_index]
+        approx_birth_year = cluster_frame["approx_birth_year"].dropna()
+        record: dict[str, object] = {}
+        record["rows"] = int(len(cluster_frame))
+        record["birth_year_min"] = int(approx_birth_year.min()) if not approx_birth_year.empty else None
+        record["birth_year_max"] = int(approx_birth_year.max()) if not approx_birth_year.empty else None
+        record["birth_year_median"] = float(approx_birth_year.median()) if not approx_birth_year.empty else None
+        record["year_min"] = int(cluster_frame["year"].min()) if not cluster_frame["year"].empty else None
+        record["year_max"] = int(cluster_frame["year"].max()) if not cluster_frame["year"].empty else None
+        record["bib_nunique"] = int(
+            cluster_frame["bib_number"].nunique(dropna=True)) if "bib_number" in cluster_frame.columns else 0
+        record["event_count"] = int(cluster_frame.groupby(["race_id", "year"], sort=False).ngroups)
+        record["city_nunique"] = int(
+            cluster_frame["city_norm"].nunique(dropna=True)) if "city_norm" in cluster_frame.columns else 0
+        return record
 
-        report["examples_event_rows"] = (
-            suspicious_event.sort_values(event_cols)
-            .loc[:,
-            ["runner_id", "surname", "name", "gender", "race_id", "year", "age", "city", "bib_number", "time_seconds",
-             "approx_birth_year"]]
-            .head(50)
-            .reset_index(drop=True)
-        )
+    def _cluster_sort_key(self, cluster_item: dict[str, object]) -> tuple[float, int, int, int]:
+        birth_median = cluster_item.get("birth_year_median")
+        birth_value = float(birth_median) if birth_median is not None else 10000.0
+        year_min_value = int(cluster_item.get("year_min", 10000))
+        bib_nunique_value = int(cluster_item.get("bib_nunique", 0))
+        rows_value = int(cluster_item.get("rows", 0))
+        return (birth_value, year_min_value, bib_nunique_value, -rows_value)
 
-        return report
+    def _fill_city_within_cluster(self, dataframe: pd.DataFrame, cluster_index: pd.Index) -> None:
+        if "city" not in dataframe.columns or "city_norm" not in dataframe.columns:
+            return
+        city_norm = dataframe.loc[cluster_index, "city_norm"]
+        city_non_na = city_norm.dropna().unique().tolist()
+        if len(city_non_na) != 1:
+            return
+        target_city = city_non_na[0]
+        city_raw = dataframe.loc[cluster_index, "city"].astype("string").str.strip()
+        missing_mask = city_raw.isna() | (city_raw == "") | (city_raw == "None")
+        missing_index = cluster_index[missing_mask]
+        if len(missing_index) == 0:
+            return
+        dataframe.loc[missing_index, "city"] = target_city
+
+    def _cluster_record(
+            self,
+            surname_key: str,
+            name_key: str,
+            base_runner_id: str,
+            assigned_runner_id: str,
+            group_majority_gender: str,
+            cluster_item: dict[str, object],
+    ) -> dict[str, object]:
+        record: dict[str, object] = {}
+        record["surname_key"] = surname_key
+        record["name_key"] = name_key
+        record["base_runner_id"] = base_runner_id
+        record["runner_id"] = assigned_runner_id
+        record["group_majority_gender"] = group_majority_gender
+        for key_name in [
+            "rows", "birth_year_min", "birth_year_max", "birth_year_median",
+            "year_min", "year_max", "city_nunique", "event_count", "bib_nunique",
+        ]:
+            record[key_name] = cluster_item.get(key_name)
+        return record
+
+    def _maybe_write_cluster_json(self, cluster_records: list[dict[str, object]]) -> None:
+        preprocessing_config = self.config.get("preprocessing", {})
+        enabled = bool(preprocessing_config.get("write_person_clusters_json", False))
+        if not enabled:
+            return
+        output_path = preprocessing_config.get("person_clusters_json_path", "person_clusters.json")
+        try:
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, object] = {}
+            payload["clusters"] = cluster_records
+            payload["clusters_count"] = int(len(cluster_records))
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("JSON отчёт по кластерам записан: %s (кластеров=%d)", str(path), int(len(cluster_records)))
+        except Exception:
+            logger.exception("Не удалось записать JSON отчёт по кластерам")
 
     def add_transformed_columns(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         """
@@ -496,8 +591,6 @@ class Preprocessor:
         soft_dupes = deduplicated.loc[soft_dupes_mask]
 
         if not soft_dupes.empty:
-            # TODO: когда буду делать модель индивидуального эффекта по человеку # Тогда runner_id важен, и
-            #  подозрительные группы нужно исключить только из части, # где используется runner_id
             logger.info(
                 f"Найдено {len(soft_dupes)} записей в подозрительных группах "
                 f"по {group_keys}. Строки не удаляются, только логируются."
@@ -526,127 +619,6 @@ class Preprocessor:
             # )
 
         return deduplicated
-
-    def _split_into_person_clusters(self, group: pd.DataFrame) -> list[pd.DataFrame]:
-        """
-        Разбить группу (surname, name, gender) на кластеры по approx_birth_year.
-        """
-        clusters: list[pd.DataFrame] = []
-
-        if group.empty:
-            return clusters
-
-        surname_value = str(group["surname"].iloc[0])
-        name_value = str(group["name"].iloc[0])
-        full_name = f"{surname_value}_{name_value}"
-
-        # pop(0) это O(n). Берём стек.
-        pending_groups: list[pd.DataFrame] = [group]
-
-        while pending_groups:
-            current_group = pending_groups.pop()
-
-            birth_year_series = current_group["approx_birth_year"].dropna()
-            if birth_year_series.empty:
-                clusters.append(current_group)
-                continue
-
-            # Быстро, без sorted(unique)
-            min_year = int(birth_year_series.min())
-            max_year = int(birth_year_series.max())
-            if max_year - min_year <= 1:
-                clusters.append(current_group)
-                continue
-
-            # Быстрое вычисление моды: O(n), а не O(n^2)
-            mode_birth_year = int(birth_year_series.value_counts().idxmax())
-
-            first_mask = birth_year_series.between(mode_birth_year - 1, mode_birth_year + 1)
-            # first_mask относится только к индексам birth_year_series, приводим к индексу current_group
-            first_index = birth_year_series.index[first_mask]
-
-            first_cluster = current_group.loc[first_index].copy()
-            rest_cluster = current_group.drop(index=first_index).copy()
-
-            clusters.append(first_cluster)
-
-            if not rest_cluster.empty:
-                pending_groups.append(rest_cluster)
-
-        if len(clusters) > 1:
-            logger.info(
-                f"Группа {full_name} разделена на {len(clusters)} кластера "
-                f"(разные люди с одинаковым ФИО)"
-            )
-
-        return clusters
-
-    def _assign_runner_ids(
-        self,
-        clusters: list[pd.DataFrame],
-        base_runner_id: str,
-    ) -> list[pd.DataFrame]:
-        """
-        Присвоить каждому кластеру стабильный runner_id.
-        """
-        updated_clusters: list[pd.DataFrame] = []
-
-        for index, cluster in enumerate(clusters):
-            cluster_copy = cluster.copy()
-            if index == 0:
-                cluster_copy["runner_id"] = base_runner_id
-            else:
-                cluster_copy["runner_id"] = f"{base_runner_id}_{index}"
-            updated_clusters.append(cluster_copy)
-
-        return updated_clusters
-
-    def _fill_city_in_clusters(
-            self,
-            clusters: list[pd.DataFrame],
-            base_runner_id: str,
-    ) -> list[pd.DataFrame]:
-        updated_clusters: list[pd.DataFrame] = []
-
-        for cluster in clusters:
-            if "city_canon" not in cluster.columns:
-                updated_clusters.append(cluster)
-                continue
-
-            cluster_copy = cluster.copy()
-
-            canon = cluster_copy["city_canon"]
-            non_null = canon.dropna()
-
-            if non_null.empty:
-                updated_clusters.append(cluster_copy)
-                continue
-
-            unique_values = non_null.unique()
-            if len(unique_values) == 1:
-                target_city = str(unique_values[0])
-
-                cluster_copy["city_canon"] = canon.fillna(target_city)
-                cluster_copy["city"] = target_city
-
-                updated_clusters.append(cluster_copy)
-                continue
-
-            num_missing = int(cluster_copy["city"].isna().sum()) if "city" in cluster_copy.columns else 0
-
-            # конфликт логируем, но ничего не заполняем
-            base_message = (
-                f"Города в кластере {base_runner_id} "
-                f"не сведены к одному значению: {sorted(str(value) for value in unique_values)}"
-            )
-            if num_missing > 0:
-                logger.info(f"{base_message}; {num_missing} пропусков city не заполнен")
-            else:
-                logger.info(base_message)
-
-            updated_clusters.append(cluster_copy)
-
-        return updated_clusters
 
     def analyze_suspicious(self, df_clean):
         dataframe = df_clean.copy()
@@ -706,28 +678,3 @@ class Preprocessor:
         return report
 
 
-    def disambiguate_same_event_by_bib(self, df_clean: pd.DataFrame) -> pd.DataFrame:
-        dataframe = df_clean.copy()
-
-        runner_id_series = dataframe["runner_id"].astype("string").str.strip()
-        split_table = runner_id_series.str.split("_", n=1, expand=True)
-        dataframe["surname"] = split_table[0]
-        dataframe["name"] = split_table[1]
-
-        group_cols_event = ["surname", "name", "gender", "race_id", "year"]
-        bib_nunique_table = (
-            dataframe.groupby(group_cols_event, sort=False)["bib_number"]
-            .nunique(dropna=True)
-            .reset_index(name="bib_nunique")
-        )
-        dataframe = dataframe.merge(bib_nunique_table, on=group_cols_event, how="left")
-
-        mask = dataframe["bib_nunique"] > 1
-        if mask.any():
-            bib_series = dataframe["bib_number"].astype("Int64").astype("string")
-            bib_series = bib_series.fillna("NA")
-            base_runner_id = dataframe["surname"].astype("string") + "_" + dataframe["name"].astype("string")
-            dataframe.loc[mask, "runner_id"] = base_runner_id.loc[mask] + "_B" + bib_series.loc[mask]
-
-        dataframe = dataframe.drop(columns=["surname", "name", "bib_nunique"])
-        return dataframe
