@@ -17,8 +17,69 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 logger = logging.getLogger(__name__)
+
+from pathlib import Path
+
+
+def flatten_age_references(references_by_race: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Превращает dict[race_id -> table(gender, age, ...)] в единый DataFrame
+    с колонкой race_id. Это и будет трасса–пол–возраст.
+    """
+    parts: list[pd.DataFrame] = []
+    for race_id_value, table in references_by_race.items():
+        if table is None or table.empty:
+            continue
+        chunk = table.copy()
+        chunk.insert(0, "race_id", str(race_id_value))
+        parts.append(chunk)
+
+    if not parts:
+        return pd.DataFrame()
+
+    result = pd.concat(parts, ignore_index=True)
+    sort_cols = [col for col in ["race_id", "gender", "age"] if col in result.columns]
+    if sort_cols:
+        result = result.sort_values(sort_cols).reset_index(drop=True)
+    return result
+
+def format_seconds_to_hhmmss(seconds_series: pd.Series) -> pd.Series:
+    seconds_int = pd.to_numeric(seconds_series, errors="coerce").round().astype("Int64")
+
+    hours = (seconds_int // 3600).astype("Int64")
+    minutes = ((seconds_int % 3600) // 60).astype("Int64")
+    seconds = (seconds_int % 60).astype("Int64")
+
+    hours_str = hours.astype("string").str.zfill(2)
+    minutes_str = minutes.astype("string").str.zfill(2)
+    seconds_str = seconds.astype("string").str.zfill(2)
+
+    return hours_str + ":" + minutes_str + ":" + seconds_str
+
+
+
+def save_age_references_xlsx(
+    references_by_race: dict[str, pd.DataFrame],
+    output_path: str | Path,
+) -> Path:
+    """
+    Сохраняет возрастные референсы в один Excel-файл (один лист).
+    Формат строк: race_id - gender - age.
+    """
+    output_file = Path(output_path)
+    if output_file.suffix.lower() != ".xlsx":
+        raise ValueError("output_path must end with .xlsx")
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    flat = flatten_age_references(references_by_race)
+
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        flat.to_excel(writer, sheet_name="age_references", index=False)
+
+    logger.info("Age references saved: %s, rows=%s", output_file, len(flat))
+    return output_file
 
 
 class AgeReferenceBuilder:

@@ -9,7 +9,6 @@ import pandas as pd
 from DataLoader.manifest import ManifestBuilder, ManifestStore
 from DataLoader.parquet_store import ParquetStore
 from DataLoader.excel_parsing import (
-    CityNormalizer,
     ExcelMetadataReader,
     RaceTitleParser,
     ResultsTableParser,
@@ -154,13 +153,11 @@ class DataLoader:
 
         self._title_parser = RaceTitleParser()
         self._metadata_reader = ExcelMetadataReader(meta_rows=self.META_ROWS, title_parser=self._title_parser)
-        self._city_normalizer = CityNormalizer()
         self._table_schema = ResultsTableSchema(required_columns=REQUIRED_TABLE_COLUMNS)
         self._table_parser = ResultsTableParser(
             min_age=self.MIN_AGE,
             max_age=self.MAX_AGE,
-            output_columns=OUTPUT_COLUMNS,
-            city_normalizer=self._city_normalizer,
+            output_columns=OUTPUT_COLUMNS
         )
         self._cache = DirectoryCache(
             manifest_name="list_excel.yaml",

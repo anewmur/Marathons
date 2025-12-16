@@ -17,11 +17,36 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-
 import numpy as np
 import pandas as pd
-
 logger = logging.getLogger(__name__)
+from pathlib import Path
+
+
+def save_trace_references_xlsx(
+    references_df: pd.DataFrame,
+    output_path: str | Path,
+) -> Path:
+    output_file = Path(output_path)
+    if output_file.suffix.lower() != ".xlsx":
+        raise ValueError("output_path must end with .xlsx")
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if references_df is None or references_df.empty:
+        raise ValueError("Trace references DataFrame is empty")
+
+    df_out = references_df.copy()
+
+    sort_cols = [col for col in ["race_id", "gender"] if col in df_out.columns]
+    if sort_cols:
+        df_out = df_out.sort_values(sort_cols).reset_index(drop=True)
+
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="trace_references", index=False)
+
+    logger.info("Trace references saved: %s, rows=%s", output_file, len(df_out))
+    return output_file
 
 
 class TraceReferenceBuilder:
@@ -195,7 +220,7 @@ class TraceReferenceBuilder:
         sorted_times = np.sort(times)
 
         # Top fraction
-        top_size = int(round(sorted_times.size * self.top_fraction))
+        top_size = int(np.ceil(sorted_times.size * self.top_fraction))
         if top_size < 1:
             return None, 0
 
@@ -235,10 +260,10 @@ class TraceReferenceBuilder:
             return 0.0
 
         rng = np.random.default_rng(self.random_seed)
-        n = times.size
+
 
         # Генерируем ВСЕ индексы разом: матрица (n_bootstrap, n)
-        indices = rng.integers(0, n, size=(self.bootstrap_samples, n))
+        indices = rng.integers(0, times.size, size=(self.bootstrap_samples, times.size))
 
         # Получаем все bootstrap-выборки разом
         all_resamples = times[indices]  # shape: (n_bootstrap, n)
@@ -247,7 +272,7 @@ class TraceReferenceBuilder:
         all_sorted = np.sort(all_resamples, axis=1)
 
         # Top fraction — берём первые top_size элементов каждой строки
-        top_size = int(round(n * self.top_fraction))
+        top_size = int(round(times.size * self.top_fraction))
         if top_size < 1:
             return 0.0
 

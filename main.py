@@ -17,9 +17,9 @@ from utils.raw_filter import RawFilter
 import DataLoader.data_loader as data_loader_module
 from DataLoader.data_loader import DataLoader
 
-from preprocessor import Preprocessor
-from trace_reference_builder import TraceReferenceBuilder
-from age_reference_builder import AgeReferenceBuilder
+from Preprocessor.preprocessor import Preprocessor
+from trace_reference_builder import TraceReferenceBuilder, save_trace_references_xlsx
+from age_reference_builder import AgeReferenceBuilder, save_age_references_xlsx, format_seconds_to_hhmmss
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +474,12 @@ class MarathonModel:
             elapsed_sec=elapsed,
             extra=f"groups={groups}",
         )
+
+        self.trace_references["trace_references_h"] = (
+            format_seconds_to_hhmmss(self.trace_references["reference_time"]))
+
+        # save_trace_references_xlsx(self.trace_references, "outputs/trace_references.xlsx")
+
         return self
 
     # ------------------------------------------------------------------
@@ -494,11 +500,40 @@ class MarathonModel:
 
         loy_frame = self._get_loy_frame(self.df_clean)
         builder = AgeReferenceBuilder(self.config)
+
         references_by_race: dict[str, pd.DataFrame] = {}
 
         for race_id_value, race_group in loy_frame.groupby("race_id", sort=False):
             table = builder.build(race_group)
             if table is None or table.empty:
+                group_sizes = (
+                    race_group
+                    .groupby(["gender", "age"], sort=False)
+                    .size()
+                    .sort_values(ascending=False)
+                )
+
+                max_group = int(group_sizes.iloc[0]) if not group_sizes.empty else 0
+                groups_total = int(group_sizes.size)
+                groups_ge_min = int((group_sizes >= builder.min_group_size).sum())
+
+                top_k = 10
+                top_pairs = []
+                for (gender_value, age_value), group_size in group_sizes.head(top_k).items():
+                    top_pairs.append(f"{gender_value}:{int(age_value)}={int(group_size)}")
+                top_pairs_text = "; ".join(top_pairs) if top_pairs else "none"
+
+                logger.warning(
+                    "build_age_references: race_id=%s: no medians: rows=%s, groups_total=%s, "
+                    "min_group_size=%s, groups_ge_min=%s, max_group=%s, top_groups=%s",
+                    str(race_id_value),
+                    len(race_group),
+                    groups_total,
+                    builder.min_group_size,
+                    groups_ge_min,
+                    max_group,
+                    top_pairs_text,
+                )
                 continue
             table = table.rename(
                 columns={
@@ -507,13 +542,19 @@ class MarathonModel:
                     "median_std": "age_median_std",
                 }
             ).reset_index(drop=True)
+
             table["age_median_var"] = table["age_median_std"] ** 2
+            table["age_median_time_h"] = format_seconds_to_hhmmss(table["age_median_time"])
+
             references_by_race[str(race_id_value)] = table
 
         total_rows = sum(len(df) for df in references_by_race.values())
         elapsed = time.time() - start_time
 
         self.age_references = references_by_race
+
+        # save_age_references_xlsx(self.age_references, "outputs/age_references.xlsx")
+
         self._steps_completed["build_age_references"] = True
         self._log_step(
             "build_age_references",

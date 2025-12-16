@@ -1,0 +1,59 @@
+"""
+preprocessor.py
+
+# Карта предобработки — принятая версия (Code_rules compliant)
+
+## Контракты входа и выхода
+
+* Вход Preprocessor.run(df_with_row_id):
+  - индекс: row_id (уникальный, index.name == "row_id")
+  - обязательные колонки: surname, name, race_id, year, gender, age, time_seconds, status, city (опционально), bib_number (опционально), distance_km (опционально)
+  - предположение: данные уже прошли raw-фильтрацию в MarathonModel.filter_raw() (status == "OK", time_seconds > 0 и not null)
+
+* Выход df_clean:
+  - индекс: тот же row_id (неизменный)
+  - добавлены: runner_id (str, not NaN), Y (log_time), x (нормализованный age)
+  - city дозаполнен внутри runner_id (где возможно)
+  - удалены строгие дубли
+
+## Пайплайн (цепочка .pipe)
+
+df = (
+    df
+    .pipe(validate_input_contract)
+    .pipe(normalize_core_strings)
+    .pipe(assign_runner_id)              # использует person_disambiguation.py
+    .pipe(fill_city_within_runner)
+    .pipe(add_features)
+    .pipe(deduplicate_strict)
+    .pipe(flag_soft_duplicates)          # только логирование/флаги, без удаления
+)
+
+## Границы ответственности
+
+- preprocessor.py:
+  - class Preprocessor: дирижёр (конфиг + run())
+  - pipe-функции: чистые трансформации (DataFrame → DataFrame)
+  - хелперы: _log_step, debug_slice
+
+- person_disambiguation.py (отдельный модуль):
+  - функции для assign_runner_id (build_person_key, build_birth_year_proxy, split_into_person_clusters, format_runner_id)
+
+## Логирование
+
+- Каждая pipe-функция логирует одной строкой через _log_step:
+  step_name, rows_in → rows_out, dropped, elapsed_sec, 1–3 ключевые метрики
+
+- Формат: logging.info("step_name: rows {rows_in} → {rows_out} (dropped {dropped}), elapsed {elapsed:.3f}s, extra: {key=value,...}")
+
+## Инварианты (минимальные)
+
+- validate_input_contract: index unique + name=="row_id", обязательные колонки
+- assign_runner_id: runner_id not NaN, str
+- deduplicate_strict: нет строгих дублей по ключу
+
+## Дедупликация
+
+- strict: удаление точных повторов (runner_id + race_id + year + time_seconds + bib_number если надёжен)
+- soft: только логирование подозрительных групп (много записей в одном забеге, разные города и т.д.)
+"""

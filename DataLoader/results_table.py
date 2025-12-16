@@ -7,7 +7,6 @@ import logging
 import pandas as pd
 
 from utils.utils import parse_gender_from_category, parse_status, parse_time_to_seconds
-from DataLoader.city_normalizer import CityNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class ResultsTableSchema:
 
 class ResultsTableParser:
     """
-    Парсит таблицу результатов в контракт DataLoader.
+    Парсит таблицу результатов в DataLoader.
     """
 
     def __init__(
@@ -46,7 +45,6 @@ class ResultsTableParser:
         min_age: int,
         max_age: int,
         output_columns: list[str],
-        city_normalizer: CityNormalizer,
     ) -> None:
         """
         Input: границы возраста, выходные колонки, нормализатор города.
@@ -56,7 +54,6 @@ class ResultsTableParser:
         self.min_age = min_age
         self.max_age = max_age
         self.output_columns = list(output_columns)
-        self.city_normalizer = city_normalizer
 
     def find_bib_column(self, table_df: pd.DataFrame) -> str | None:
         """
@@ -82,7 +79,6 @@ class ResultsTableParser:
         Returns: DataFrame с контрактом DataLoader.
         Does: парсит строки, фильтрует по полу/возрасту, добавляет distance_km.
         """
-        has_city = "Город" in table_df.columns
         bib_column = self.find_bib_column(table_df)
 
         records: list[dict[str, object]] = []
@@ -124,8 +120,6 @@ class ResultsTableParser:
 
             if status == "OK" and time_seconds is None:
                 status = "BAD_TIME"
-
-            city_value = self.city_normalizer.normalize_city_value(row["Город"]) if has_city else None
 
             bib_number: int | None = None
             if bib_column is not None and pd.notna(row[bib_column]):
