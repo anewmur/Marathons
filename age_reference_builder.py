@@ -118,6 +118,13 @@ class AgeReferenceBuilder:
 
         self._validate_params()
 
+        logger.info(
+            "AgeReferenceBuilder config: min_group_size=%d, bootstrap_samples=%d, random_seed=%d",
+            self.min_group_size,
+            self.bootstrap_samples,
+            self.random_seed,
+        )
+
     def _validate_params(self) -> None:
         """Проверить корректность параметров."""
         if self.min_group_size < 1:
@@ -127,6 +134,10 @@ class AgeReferenceBuilder:
         if self.bootstrap_samples < 1:
             raise ValueError(
                 f"age_references.bootstrap_samples должен быть >= 1, получено {self.bootstrap_samples}"
+            )
+        if self.random_seed < 0:
+            raise ValueError(
+                f"age_references.random_seed должен быть >= 0, получено {self.random_seed}"
             )
 
     def build(self, dataframe: pd.DataFrame) -> pd.DataFrame:

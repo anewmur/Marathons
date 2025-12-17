@@ -154,11 +154,11 @@ class CityNormalizer:
         if not lowered:
             return None
 
-        # ключ для словаря
-        key = lowered
+        # if lowered == 'минская обл':
+        #     print('!')
 
-        if key in CITY_CANONICAL_MAP:
-            return CITY_CANONICAL_MAP[key]
+        if lowered in CITY_CANONICAL_MAP:
+            return CITY_CANONICAL_MAP[lowered]
 
         # fallback: аккуратный Title Case
         return lowered.title()

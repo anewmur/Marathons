@@ -1,6 +1,3 @@
-
-from __future__ import annotations
-
 from pathlib import Path
 import logging
 
@@ -108,6 +105,7 @@ class ResultsTableParser:
 
             try:
                 age_value = int(row["Возраст"]) if pd.notna(row["Возраст"]) else None
+                city_value = row["Город"] if pd.notna(row["Город"]) else None
             except (ValueError, TypeError):
                 age_value = None
 

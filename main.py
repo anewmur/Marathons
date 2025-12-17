@@ -24,6 +24,29 @@ from age_reference_builder import AgeReferenceBuilder, save_age_references_xlsx,
 logger = logging.getLogger(__name__)
 
 
+def log_frame_stats(frame_name: str, data: pd.DataFrame) -> None:
+    """
+    Логирует быстрые метрики датафрейма: размер, уникальные трассы, пол, статус,
+    и доли NA по ключевым колонкам (если они есть).
+    """
+    rows_count = int(len(data))
+    cols_count = int(len(data.columns))
+
+    metrics: dict[str, Any] = {"rows": rows_count, "cols": cols_count}
+
+    if "race_id" in data.columns:
+        metrics["races"] = int(data["race_id"].nunique(dropna=False))
+    if "gender" in data.columns:
+        metrics["gender_counts"] = data["gender"].value_counts(dropna=False).to_dict()
+    if "status" in data.columns:
+        metrics["status_counts"] = data["status"].value_counts(dropna=False).to_dict()
+
+    for column_name in ["runner_id", "time_seconds", "age", "Y", "x", "city"]:
+        if column_name in data.columns:
+            metrics[f"na_{column_name}"] = float(data[column_name].isna().mean())
+
+    logger.info("%s: %s", frame_name, metrics)
+
 class MarathonModel:
     """
     Оркестратор пайплайна прогнозирования времени финиша.
@@ -65,6 +88,7 @@ class MarathonModel:
         self.data_path = Path(data_path)
         self.verbose = verbose
         self.config = self._load_config()
+        self.dumping_info = self.config.get("dumping_info", {})
 
         if validation_year is None:
             self.validation_year = int(self.config.get("validation", {}).get("year", 0))
@@ -478,7 +502,8 @@ class MarathonModel:
         self.trace_references["trace_references_h"] = (
             format_seconds_to_hhmmss(self.trace_references["reference_time"]))
 
-        # save_trace_references_xlsx(self.trace_references, "outputs/trace_references.xlsx")
+        if self.dumping_info:
+            save_trace_references_xlsx(self.trace_references, "outputs/trace_references.xlsx")
 
         return self
 
@@ -553,7 +578,8 @@ class MarathonModel:
 
         self.age_references = references_by_race
 
-        # save_age_references_xlsx(self.age_references, "outputs/age_references.xlsx")
+        if self.dumping_info:
+            save_age_references_xlsx(self.age_references, "outputs/age_references.xlsx")
 
         self._steps_completed["build_age_references"] = True
         self._log_step(
@@ -568,21 +594,56 @@ class MarathonModel:
     # ------------------------------------------------------------------
     # step 7: fit age model
     # ------------------------------------------------------------------
+
     def fit_age_model(self) -> "MarathonModel":
         """
-        Обучает возрастную модель (заглушка).
-        Input: ---
-        Returns: self.
-        Does: помечает шаг выполненным (реальная модель пока не реализована).
+        Обучает возрастную модель (пока заглушка).
+        Делает: формирует train_frame (LOY) и фиксирует шаг как выполненный.
         """
-        self._check_step(
-            "fit_age_model",
-            ["preprocess", "build_trace_references"],
-        )
+        self._check_step("fit_age_model", ["preprocess", "build_trace_references"])
+
         start_time = time.time()
-        elapsed = time.time() - start_time
+        rows_in = len(self.df_clean)
+
+        start_frame = self.df_clean.copy()
+        train_frame = start_frame
+
+        if "status" in train_frame.columns:
+            train_frame = train_frame[train_frame["status"] == "OK"].copy()
+
+        validation_year = int(self.config.get("validation", {}).get("year", 0))
+        rows_before_year_drop = len(train_frame)
+        if validation_year > 0 and "year" in train_frame.columns:
+            train_frame = train_frame[train_frame["year"] != validation_year].copy()
+
+        required_columns = ["race_id", "gender", "age", "time_seconds", "Y", "x"]
+        missing_columns = [col for col in required_columns if col not in train_frame.columns]
+        if missing_columns:
+            raise ValueError(f"fit_age_model: missing columns: {missing_columns}")
+
+        rows_out = len(train_frame)
+        train_frame = train_frame.dropna(subset=required_columns).copy()
+        # после фильтра по году:
+        dropped_by_year = rows_before_year_drop - len(train_frame)
+        rows_before_na_drop = len(train_frame)
+        # после dropna:
+        dropped_by_na = rows_before_na_drop - len(train_frame)
+
+        extra_parts: list[str] = []
+        extra_parts.append(f"validation_year={validation_year}")
+        extra_parts.append(f"dropped_by_year={dropped_by_year}")
+        extra_parts.append(f"dropped_by_na={dropped_by_na}")
+
+        extra = ", ".join(extra_parts)
+
         self._steps_completed["fit_age_model"] = True
-        self._log_step("fit_age_model", rows_in=0, rows_out=0, elapsed_sec=elapsed)
+        self._log_step(
+            "fit_age_model",
+            rows_in=rows_in,
+            rows_out=rows_out,
+            elapsed_sec=(time.time() - start_time),
+            extra=extra,
+        )
         return self
 
     # ------------------------------------------------------------------

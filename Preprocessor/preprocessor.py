@@ -3,7 +3,8 @@ from utils.city_normalizer import CityNormalizer, dump_unrecognized_cities
 import logging
 import time
 from typing import Any
-
+import math
+from dictionaries import PERSON_TOKEN_CYR_TO_LAT
 import pandas as pd
 from utils.compress_sorted import dump_homonyms_by_birth_year
 
@@ -182,7 +183,8 @@ def normalize_core_strings(df: pd.DataFrame) -> pd.DataFrame:
         series = series.replace("", pd.NA)
 
         if column_name in {"surname", "name"}:
-            series = series.str.upper()
+            series = series.map(translit_person_token_to_lat)
+            series = series.astype("string").str.upper()
 
         df_out[column_name] = series
 
@@ -236,7 +238,25 @@ def build_person_base_key(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df_out
 
+def translit_person_token_to_lat(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if pd.isna(value):
+        return None
 
+    lowered = str(value).strip().lower()
+    if not lowered:
+        return None
+
+    parts: list[str] = []
+    for char in lowered:
+        mapped = PERSON_TOKEN_CYR_TO_LAT.get(char)
+        if mapped is None:
+            parts.append(char)
+        else:
+            parts.append(mapped)
+
+    return "".join(parts).upper()
 
 def compute_approx_birth_year(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -269,43 +289,32 @@ def compute_approx_birth_year(df: pd.DataFrame) -> pd.DataFrame:
     return df_out
 
 def assign_runner_id(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Присваивает runner_id с разукрупнением по году рождения.
-
-    Правило MVP:
-    - группируем по person_set_key
-    - если в группе >1 уникальный approx_birth_year (dropna), добавляем суффикс _{year}
-    - если approx_birth_year NA, суффикс _UNKNOWN
-    """
     start_time = time.time()
     rows_in = len(df)
 
-    df_out = (
-        df
-        .pipe(build_person_base_key)
-        .pipe(compute_approx_birth_year)
+    required_columns = ["person_set_key", "birth_year_stable", "birth_cluster_min_year", "race_id", "year"]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns for assign_runner_id: {missing_columns}")
+
+    df_out = df.copy()
+
+    birth_year_series = df_out["birth_year_stable"].astype("Int64")
+
+    min_year_series = df_out["birth_cluster_min_year"].astype("Int64")
+    has_birth = birth_year_series.notna() & min_year_series.notna()
+
+    df_out["birth_suffix"] = "_UNKNOWN"
+    df_out.loc[has_birth, "birth_suffix"] = (
+            "_" + birth_year_series.loc[has_birth].astype("string")
+            + "_M" + min_year_series.loc[has_birth].astype("string")
     )
-
-    df_out = df_out.sort_values(["person_set_key", "approx_birth_year"], kind="mergesort")
-
-    birth_nunique_per_set = df_out.groupby("person_set_key")["approx_birth_year"].transform("nunique")
-    multi_birth_mask = birth_nunique_per_set > 1
-    na_birth_mask = df_out["approx_birth_year"].isna()
-
-    df_out["birth_suffix"] = ""
-    df_out.loc[multi_birth_mask, "birth_suffix"] = "_" + df_out.loc[multi_birth_mask, "approx_birth_year"].astype("Int64").astype("string")
-    df_out.loc[na_birth_mask, "birth_suffix"] = "_UNKNOWN"
 
     df_out["runner_id"] = (df_out["person_set_key"] + df_out["birth_suffix"]).astype("string")
 
-    if df_out["runner_id"].isna().any():
-        raise ValueError("Nulls in runner_id after assignment")
-
     event_dups_mask = df_out.duplicated(subset=["runner_id", "race_id", "year"], keep=False)
     suspicious_multi_start_rows = int(event_dups_mask.sum())
-
-    multi_birth_group_count = int((birth_nunique_per_set > 1).groupby(df_out["person_set_key"]).any().sum())
-
     runner_id_counts = df_out["runner_id"].value_counts(dropna=False)
 
     _log_step(
@@ -316,15 +325,11 @@ def assign_runner_id(df: pd.DataFrame) -> pd.DataFrame:
         {
             "nunique_runner_id": int(df_out["runner_id"].nunique(dropna=False)),
             "max_group_size": int(runner_id_counts.max()),
-            "multi_birth_group_count": multi_birth_group_count,
             "suspicious_multi_start_rows": suspicious_multi_start_rows,
-            "mode": "set_key_with_birth_year",
+            "mode": "set_key_with_birth_year_stable_and_cluster",
         },
     )
-
-    # dump_homonyms_by_birth_year(df_out.sort_index(), "outputs/homonyms_dump.txt", min_group_size=2)
-
-    return df_out.sort_index()
+    return df_out
 
 def compute_city_mode_per_runner(df: pd.DataFrame) -> pd.Series:
     """
@@ -476,157 +481,63 @@ def deduplicate_strict(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_out.sort_index()
 
-def flag_soft_duplicates(df: pd.DataFrame) -> pd.DataFrame:
+def drop_ambiguous_event_multi(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Логирует soft-подозрительные случаи (не удаляет строки).
-    Добавляет флаг soft_dupe_flag для дебага.
+    Удаляет неразрешимые случаи многократных записей в одном событии.
+
+    Правило:
+    1) Если в (runner_id, race_id, year) >1 строк и >1 bib_number и city один, удаляем.
+    2) После разукрупнения по городу любые оставшиеся event_multi тоже удаляем целиком
+       (редкие случаи, не стоящие отдельной логики).
     """
     start_time = time.time()
     rows_in = len(df)
 
-    df_out = df.copy()
+    required_columns = ["runner_id", "race_id", "year", "bib_number", "city"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns for drop_ambiguous_event_multi: {missing_columns}")
 
-    # --------------------------------------------------
-    # 1. Несколько записей runner_id в одном забеге
-    # --------------------------------------------------
-    event_group_size = (
-        df_out
-        .groupby(["runner_id", "race_id", "year"], observed=True)
-        .transform("size")
-    )
-    event_multi_mask = event_group_size > 1
+    group_key = ["runner_id", "race_id", "year"]
 
-    event_multi_rows = int(event_multi_mask.sum())
-    event_multi_runners = int(df_out.loc[event_multi_mask, "runner_id"].nunique())
+    group_size = df.groupby(group_key, observed=True)["runner_id"].transform("size")
+    bib_nunique = df.groupby(group_key, observed=True)["bib_number"].transform("nunique")
+    city_nunique = df.groupby(group_key, observed=True)["city"].transform("nunique")
 
-    # --------------------------------------------------
-    # 2. Несколько городов у одного runner_id
-    # --------------------------------------------------
-    city_nunique = (
-        df_out
-        .groupby("runner_id", observed=True)["city"]
-        .transform("nunique")
-    )
-    multi_city_mask = city_nunique > 1
+    ambiguous_mask = (group_size > 1) & (bib_nunique > 1) & (city_nunique == 1)
+    leftover_event_multi_mask = (group_size > 1) & (~ambiguous_mask)
 
-    multi_city_rows = int(multi_city_mask.sum())
-    multi_city_runners = int(df_out.loc[multi_city_mask, "runner_id"].nunique())
+    removed_ambiguous = int(ambiguous_mask.sum())
+    removed_leftover = int(leftover_event_multi_mask.sum())
+    removed_total = removed_ambiguous + removed_leftover
 
-    # --------------------------------------------------
-    # Общий флаг
-    # --------------------------------------------------
-    df_out["soft_dupe_flag"] = event_multi_mask | multi_city_mask
-    flagged_rows = int(df_out["soft_dupe_flag"].sum())
+    if removed_leftover > 0:
+        debug_df = df.loc[leftover_event_multi_mask, [
+            "runner_id", "race_id", "year", "bib_number", "city", "age", "time_seconds",
+        ]]
+        logger.warning(
+            "drop_ambiguous_event_multi: leftover event_multi rows=%d\n%s",
+            removed_leftover,
+            debug_df.sort_values(["runner_id", "race_id", "year"]).head(50).to_string(index=True),
+        )
 
-    # --------------------------------------------------
-    # DEBUG: примеры подозрительных случаев
-    # --------------------------------------------------
-    # if logger.isEnabledFor(logging.DEBUG) and flagged_rows > 0:
-    #     runner_ids_to_show = (
-    #         df_out.loc[df_out["soft_dupe_flag"], "runner_id"]
-    #         .dropna()
-    #         .astype("string")
-    #         .unique()
-    #         .tolist()
-    #     )[:5]
-    #
-    #     lines: list[str] = []
-    #     lines.append("flag_soft_duplicates groups debug")
-    #     lines.append(f"  shown_runner_ids: {len(runner_ids_to_show)}")
-    #
-    #     for runner_id_value in runner_ids_to_show:
-    #         group_df = df_out[df_out["runner_id"] == runner_id_value]
-    #
-    #         total_rows = int(len(group_df))
-    #         city_unique = int(group_df["city"].nunique(dropna=False)) if "city" in group_df.columns else 0
-    #         bib_unique = int(group_df["bib_number"].nunique(dropna=False)) if "bib_number" in group_df.columns else 0
-    #         birth_year_unique = int(group_df["approx_birth_year"].nunique(dropna=False)) if "approx_birth_year" in group_df.columns else 0
-    #
-    #         event_sizes = (
-    #             group_df
-    #             .groupby(["race_id", "year"], observed=True)
-    #             .size()
-    #         )
-    #         multi_start_event_count = int((event_sizes > 1).sum())
-    #
-    #         race_year_list = (
-    #             group_df[["race_id", "year"]]
-    #             .drop_duplicates()
-    #             .sort_values(["race_id", "year"])
-    #             .apply(lambda row: f"{row['race_id']}:{row['year']}", axis=1)
-    #             .tolist()
-    #         )
-    #
-    #         race_year_pairs = (
-    #             group_df[["race_id", "year"]]
-    #             .drop_duplicates()
-    #             .sort_values(["race_id", "year"])
-    #         )
-    #         race_year_list = [f"{race_id}:{year}" for race_id, year in zip(race_year_pairs["race_id"], race_year_pairs["year"])]
-    #
-    #         city_list = []
-    #         if "city" in group_df.columns:
-    #             city_list = (
-    #                 group_df["city"]
-    #                 .astype("string")
-    #                 .fillna("NA")
-    #                 .drop_duplicates()
-    #                 .sort_values()
-    #                 .tolist()
-    #             )
-    #
-    #         bib_list = []
-    #         if "bib_number" in group_df.columns:
-    #             bib_list = (
-    #                 group_df["bib_number"]
-    #                 .astype("string")
-    #                 .fillna("NA")
-    #                 .drop_duplicates()
-    #                 .sort_values()
-    #                 .tolist()
-    #             )
-    #
-    #         lines.append(
-    #             "  "
-    #             f"runner_id={runner_id_value} "
-    #             f"rows={total_rows} "  # сколько строк всего у этого runner_id
-    #             f"unique_birth_years={birth_year_unique} "  # сколько РАЗНЫХ approx_birth_year внутри runner_id
-    #             # >1 означает возможное слияние разных людей
-    #             f"unique_cities={city_unique} "  # сколько РАЗНЫХ городов у runner_id
-    #             # >1 означает конфликт города
-    #             f"unique_bib_numbers={bib_unique} "  # сколько разных стартовых номеров
-    #             # >1 сигнал разных стартов
-    #             f"multi_start_events={multi_start_event_count}"
-    #             # сколько (race_id, year), где у runner_id >1 строки
-    #         )
-    #
-    #         lines.append(f"    events: {race_year_list}")
-    #         lines.append(f"    cities: {city_list}")
-    #         lines.append(f"    bib_numbers: {bib_list}")
-    #
-    #     logger.debug("\n".join(lines))
+    df_out = df.loc[~(ambiguous_mask | leftover_event_multi_mask)].copy()
 
     _log_step(
-        "flag_soft_duplicates",
+        "drop_ambiguous_event_multi",
         rows_in,
         len(df_out),
         start_time,
         {
-            "event_multi_rows": event_multi_rows,  # число строк, где один runner_id имеет >1 записи
-            # в одном и том же (race_id, year)
-            "event_multi_runners": event_multi_runners,  # число runner_id, у которых есть такие мульти-старты
-            "multi_city_rows": multi_city_rows,  # число строк, принадлежащих runner_id
-            # с >1 различными значениями city
-            "multi_city_runners": multi_city_runners,  # число runner_id с конфликтом по city
-            "flagged_rows": flagged_rows,  # число строк, которые попали
-            # хотя бы в одну подозрительную группу
-            # (event_multi OR multi_city)
-        })
-
+            "removed_rows": removed_total,
+            "removed_ambiguous": removed_ambiguous,
+            "removed_leftover": removed_leftover,
+            "removed_share": round(removed_total / max(rows_in, 1), 6),
+        },
+    )
     return df_out
 
-
-def normalize_city_names(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_city_names(df: pd.DataFrame, dumping_info) -> pd.DataFrame:
     """
     Нормализует значения city с помощью CityNormalizer.
     Не заполняет пропуски, не использует runner_id.
@@ -673,46 +584,14 @@ def normalize_city_names(df: pd.DataFrame) -> pd.DataFrame:
         },
     )
 
-    dump_unrecognized_cities(
-        df_out,
-        "outputs/unrecognized_cities_top100.txt",
-    )
+    if dumping_info:
+        dump_unrecognized_cities(
+            df_out,
+            limit=200,
+            output_path="outputs/unrecognized_cities_top.txt",
+        )
 
     return df_out
-
-
-def drop_soft_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Удаляет строки, попавшие в soft_dupe_flag.
-
-    TODO: Вернуться к этим строкам позже, когда будет отдельная кластеризация однофамильцев.
-    Сейчас осознанно выкидываем их, чтобы не тащить структурный шум в модель.
-    """
-    start_time = time.time()
-    rows_in = len(df)
-
-    if "soft_dupe_flag" not in df.columns:
-        raise ValueError("soft_dupe_flag is missing. Run flag_soft_duplicates before drop_soft_duplicates.")
-
-    flagged_rows = int(df["soft_dupe_flag"].sum())
-    df_out = df.loc[~df["soft_dupe_flag"]].copy()
-
-    _log_step(
-        "drop_soft_duplicates",
-        rows_in,
-        len(df_out),
-        start_time,
-        {
-            "removed_rows": flagged_rows,
-            "removed_share": round(flagged_rows / max(rows_in, 1), 6),
-        },
-    )
-
-    return df_out
-
-
-import math
-
 
 def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd.DataFrame:
     """
@@ -782,6 +661,437 @@ def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd
 
     return df_out
 
+def build_birth_year_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Строит таблицу частот (person_set_key, approx_birth_year) -> count.
+
+    Вход:
+    - df с колонками person_set_key, approx_birth_year
+
+    Выход:
+    - DataFrame: person_set_key, approx_birth_year (Int64), count (int)
+    """
+    required_columns = ["person_set_key", "approx_birth_year"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    working = df[["person_set_key", "approx_birth_year"]].copy()
+    working = working.dropna(subset=["approx_birth_year"])
+    working["approx_birth_year"] = working["approx_birth_year"].astype("Int64")
+
+    counts = (
+        working
+        .groupby(["person_set_key", "approx_birth_year"], sort=True)
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    return counts.sort_values(["person_set_key", "approx_birth_year"]).reset_index(drop=True)
+
+
+def add_birth_cluster_id_to_counts(counts: pd.DataFrame) -> pd.DataFrame:
+    """
+    Присваивает cluster_id внутри каждого person_set_key для подряд идущих годов.
+
+    Правило:
+    - новый кластер начинается, если разница с предыдущим годом > 1
+
+    Вход:
+    - counts: person_set_key, approx_birth_year, count (отсортировано по году)
+
+    Выход:
+    - counts + cluster_id (int)
+    """
+    counts_out = counts.copy()
+
+    previous_year = counts_out.groupby("person_set_key")["approx_birth_year"].shift(1)
+    is_new_cluster = previous_year.isna() | ((counts_out["approx_birth_year"] - previous_year).abs() > 1)
+
+    counts_out["cluster_id"] = is_new_cluster.groupby(counts_out["person_set_key"]).cumsum().astype(int)
+    return counts_out
+
+
+def pick_stable_birth_year_per_cluster(counts: pd.DataFrame) -> pd.DataFrame:
+    """
+    Выбирает канонический год рождения для каждого (person_set_key, cluster_id).
+
+    Правило:
+    - берём год с максимальной count внутри кластера
+    - при равенстве count берём меньший год
+
+    Вход:
+    - counts: person_set_key, approx_birth_year, count, cluster_id
+
+    Выход:
+    - DataFrame: person_set_key, cluster_id, birth_year_stable
+    """
+    return (
+        counts
+        .sort_values(
+            ["person_set_key", "cluster_id", "count", "approx_birth_year"],
+            ascending=[True, True, False, True],
+        )
+        .drop_duplicates(subset=["person_set_key", "cluster_id"], keep="first")
+        .rename(columns={"approx_birth_year": "birth_year_stable"})
+        [["person_set_key", "cluster_id", "birth_year_stable"]]
+    )
+
+
+def attach_birth_cluster_id_to_rows(df: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
+    """
+    Примерживает cluster_id к исходным строкам по (person_set_key, approx_birth_year).
+
+    Вход:
+    - df: исходные строки
+    - counts: таблица частот с cluster_id
+
+    Выход:
+    - df + cluster_id
+    """
+    cluster_map = counts[["person_set_key", "approx_birth_year", "cluster_id"]].copy()
+    df_out = df.copy()
+    return df_out.merge(cluster_map, on=["person_set_key", "approx_birth_year"], how="left")
+
+
+def stabilize_birth_year_within_person_key(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Стабилизирует год рождения внутри person_set_key без склейки далёких годов.
+
+    Делает:
+    1) считает частоты approx_birth_year внутри person_set_key
+    2) разбивает годы на кластеры с шагом не более 1 (цепочкой)
+    3) выбирает birth_year_stable отдельно для каждого кластера
+    4) примерживает к строкам cluster_id и birth_year_stable
+
+    Выходные колонки:
+    - cluster_id (int, может быть NA если approx_birth_year NA)
+    - birth_year_stable (Int64, может быть NA)
+    """
+    counts = build_birth_year_counts(df)
+    counts = add_birth_cluster_id_to_counts(counts)
+
+    cluster_min = (
+        counts
+        .groupby(["person_set_key", "cluster_id"], sort=False)["approx_birth_year"]
+        .min()
+        .rename("birth_cluster_min_year")
+        .reset_index()
+    )
+
+    stable = pick_stable_birth_year_per_cluster(counts)
+
+    df_out = attach_birth_cluster_id_to_rows(df, counts)
+    df_out = df_out.merge(cluster_min, on=["person_set_key", "cluster_id"], how="left")
+
+    return df_out.merge(stable, on=["person_set_key", "cluster_id"], how="left")
+
+
+def stabilize_birth_year(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Шаг пайплайна: добавляет cluster_id и birth_year_stable, логирует метрики.
+
+    Предусловия:
+    - уже построены person_set_key и approx_birth_year
+
+    Постусловия:
+    - в df есть cluster_id и birth_year_stable
+    """
+    start_time = time.time()
+    rows_in = len(df)
+
+    df_out = stabilize_birth_year_within_person_key(df)
+
+    na_stable = int(df_out["birth_year_stable"].isna().sum())
+    na_cluster = int(df_out["cluster_id"].isna().sum())
+
+    _log_step(
+        "stabilize_birth_year",
+        rows_in,
+        len(df_out),
+        start_time,
+        {
+            "na_birth_year_stable": na_stable,
+            "na_birth_cluster_id": na_cluster,
+        },
+    )
+    return df_out
+
+
+def split_runner_id_by_city_when_conflicted(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Разукрупняет runner_id по городу, если внутри runner_id встречается >1 город.
+
+    Правило:
+    - считаем nunique(city) внутри runner_id (NA не считается городом)
+    - если nunique(city) > 1 и city не NA, добавляем суффикс "__CITY_{city}"
+    - если city NA, оставляем runner_id как есть (пока не умеем разделять)
+
+    Предусловия:
+    - city уже нормализован и заполнен по моде внутри runner_id (насколько возможно)
+    """
+    start_time = time.time()
+    rows_in = len(df)
+
+    required_columns = ["runner_id", "city"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns for split_runner_id_by_city_when_conflicted: {missing_columns}")
+
+    df_out = df.copy()
+
+    city_series = df_out["city"].astype("string")
+    city_nunique = df_out.groupby("runner_id", observed=True)["city"].transform("nunique")
+
+    conflict_mask = (city_nunique > 1) & city_series.notna()
+    changed_rows = int(conflict_mask.sum())
+    affected_runner_ids = int(df_out.loc[conflict_mask, "runner_id"].nunique())
+
+    df_out.loc[conflict_mask, "runner_id"] = (
+        df_out.loc[conflict_mask, "runner_id"].astype("string")
+        + "__CITY_" + city_series.loc[conflict_mask]
+    )
+
+    _log_step(
+        "split_runner_id_by_city_when_conflicted",
+        rows_in,
+        len(df_out),
+        start_time,
+        {
+            "changed_rows": changed_rows,
+            "affected_runner_ids": affected_runner_ids,
+        },
+    )
+    event_group_size = df_out.groupby(["runner_id", "race_id", "year"], observed=True)["runner_id"].transform("size")
+    left_event_multi_rows = int((event_group_size > 1).sum())
+    logger.info("after_city_split: event_multi_rows=%d", left_event_multi_rows)
+
+    return df_out
+
+
+def build_gender_counts_by_runner(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Строит частоты gender внутри runner_id.
+
+    Вход:
+    - df с колонками runner_id, gender
+
+    Выход:
+    - DataFrame: runner_id, gender, count
+    """
+    required_columns = ["runner_id", "gender"]
+    missing_columns = [column_name for column_name in required_columns if column_name not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    working = df[["runner_id", "gender"]].copy()
+    working["runner_id"] = working["runner_id"].astype("string")
+    working["gender"] = working["gender"].astype("string")
+
+    working = working.dropna(subset=["runner_id", "gender"])
+
+    counts = (
+        working
+        .groupby(["runner_id", "gender"], sort=False)
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    return counts
+
+
+def pick_majority_gender_map(counts: pd.DataFrame) -> pd.DataFrame:
+    """
+    Для каждого runner_id выбирает gender по большинству.
+    Если большинство нестрогое (ничья), помечает runner_id как ambiguous.
+
+    Вход:
+    - counts: runner_id, gender, count
+
+    Выход:
+    - DataFrame: runner_id, gender_majority, is_ambiguous
+    """
+    required_columns = ["runner_id", "gender", "count"]
+    missing_columns = [column_name for column_name in required_columns if column_name not in counts.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    counts_sorted = counts.sort_values(["runner_id", "count", "gender"], ascending=[True, False, True]).copy()
+    top_rows = counts_sorted.drop_duplicates(subset=["runner_id"], keep="first").copy()
+
+    runner_ids = top_rows["runner_id"].astype("string")
+    top_count = top_rows["count"].astype(int)
+
+    second_rows = counts_sorted.copy()
+    second_rows["rank"] = second_rows.groupby("runner_id")["count"].rank(method="first", ascending=False)
+    second_rows = second_rows[second_rows["rank"] == 2].copy()
+
+    second_map = second_rows.set_index("runner_id")["count"].to_dict()
+
+    second_count = runner_ids.map(lambda runner_id_value: second_map.get(runner_id_value, 0)).astype(int)
+    is_ambiguous = top_count <= second_count
+
+    out = pd.DataFrame({
+        "runner_id": runner_ids,
+        "gender_majority": top_rows["gender"].astype("string"),
+        "is_ambiguous": is_ambiguous,
+    })
+    return out
+
+
+def apply_majority_gender(df: pd.DataFrame, majority_map: pd.DataFrame) -> tuple[pd.DataFrame, int, int, int]:
+    """
+    Применяет majority gender и выкидывает ambiguous runner_id.
+
+    Возвращает:
+    - df_out
+    - removed_rows
+    - removed_runner_ids
+    - changed_rows
+    """
+    df_out = df.copy()
+    df_out["runner_id"] = df_out["runner_id"].astype("string")
+    df_out["gender"] = df_out["gender"].astype("string")
+
+    merged = df_out.merge(majority_map, on="runner_id", how="left")
+
+    ambiguous_mask = merged["is_ambiguous"].fillna(False)
+    removed_rows = int(ambiguous_mask.sum())
+    removed_runner_ids = int(merged.loc[ambiguous_mask, "runner_id"].nunique())
+
+    kept = merged.loc[~ambiguous_mask].copy()
+
+    before_gender = kept["gender"].astype("string")
+    kept["gender"] = kept["gender_majority"].astype("string")
+    changed_rows = int((before_gender != kept["gender"]).sum())
+
+    kept = kept.drop(columns=["gender_majority", "is_ambiguous"])
+    return kept, removed_rows, removed_runner_ids, changed_rows
+
+
+def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False) -> pd.DataFrame:
+    """
+    Делает пол внутри runner_id однозначным по большинству.
+
+    Правило:
+    - учитываем только значения gender из {"M","F"}, остальные считаем NA
+    - для каждого runner_id считаем числа M и F
+    - если есть строгое большинство: переписываем gender во всех строках этого runner_id на winner
+    - если строгого большинства нет (M==F и total>0): удаляем весь runner_id
+
+    Логи:
+    - общий шаг: removed_rows, removed_runner_ids, changed_rows
+    - два отчёта в outputs:
+      * gender_fixes_changed.txt: группы, где были и M и F, и был победитель
+      * gender_fixes_removed.txt: группы без строгого большинства
+    """
+    start_time = time.time()
+    rows_in = len(df)
+
+    required_columns = ["runner_id", "gender"]
+    missing_columns = [column_name for column_name in required_columns if column_name not in df.columns]
+    if missing_columns:
+        raise ValueError(f"fix_gender_by_majority: missing columns: {missing_columns}")
+
+    df_out = df.copy()
+
+    gender_series = df_out["gender"].astype("string")
+    gender_series = gender_series.where(gender_series.isin(["M", "F"]), pd.NA)
+    df_out["gender"] = gender_series
+
+    counts = (
+        df_out
+        .dropna(subset=["runner_id", "gender"])
+        .groupby(["runner_id", "gender"], observed=True)
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+
+    pivot = (
+        counts
+        .pivot(index="runner_id", columns="gender", values="count")
+        .fillna(0)
+        .astype(int)
+        .reset_index()
+    )
+
+    if "M" not in pivot.columns:
+        pivot["M"] = 0
+    if "F" not in pivot.columns:
+        pivot["F"] = 0
+
+    pivot["total"] = pivot["M"] + pivot["F"]
+    pivot["winner"] = pd.NA
+    pivot.loc[pivot["M"] > pivot["F"], "winner"] = "M"
+    pivot.loc[pivot["F"] > pivot["M"], "winner"] = "F"
+
+    removed_ids = pivot.loc[pivot["winner"].isna() & (pivot["total"] > 0), "runner_id"].astype("string")
+    winner_map = (
+        pivot.loc[pivot["winner"].notna(), ["runner_id", "winner"]]
+        .rename(columns={"winner": "gender_major"})
+        .copy()
+    )
+
+    df_out = df_out.merge(winner_map, on="runner_id", how="left")
+
+    removed_mask = df_out["runner_id"].astype("string").isin(removed_ids)
+    removed_rows = int(removed_mask.sum())
+    removed_runner_ids = int(removed_ids.nunique())
+
+    before_gender = df_out["gender"].astype("string")
+    apply_mask = df_out["gender_major"].notna()
+    df_out.loc[apply_mask, "gender"] = df_out.loc[apply_mask, "gender_major"]
+    after_gender = df_out["gender"].astype("string")
+
+    changed_rows = int((before_gender != after_gender).sum())
+
+    if removed_rows > 0:
+        df_out = df_out.loc[~removed_mask].copy()
+
+    report_df = pivot.sort_values(["total", "runner_id"], ascending=[False, True]).copy()
+    changed_report = report_df[(report_df["winner"].notna()) & (report_df["M"] > 0) & (report_df["F"] > 0)].copy()
+    removed_report = report_df[report_df["winner"].isna() & (report_df["total"] > 0)].copy()
+
+    if dumping_info:
+        report_path = "outputs/gender_fixes.txt"
+        with open(report_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write("ИЗМЕНЕННО (БЫЛИ ЗНАЧЕНИЯ M и Ж. ЕСТЬ БОЛЬШИНСТВО)\n")
+            file_handle.write(changed_report.to_string(index=False))
+            file_handle.write("\n\n")
+            file_handle.write("УДАЛЕНЫ, НЕТ БОЛЬШИНСТВА\n")
+            file_handle.write(removed_report.to_string(index=False))
+            file_handle.write("\n")
+
+        logger.info("fix_gender_by_majority report saved: %s", report_path)
+
+    if len(changed_report) > 0:
+        logger.warning(
+            "fix_gender_by_majority changed winners (top 30):\n%s",
+            changed_report.head(30).to_string(index=False),
+        )
+    if len(removed_report) > 0:
+        logger.warning(
+            "fix_gender_by_majority removed ambiguous (top 30):\n%s",
+            removed_report.head(30).to_string(index=False),
+        )
+
+    df_out = df_out.drop(columns=["gender_major"], errors="ignore")
+
+    _log_step(
+        "fix_gender_by_majority",
+        rows_in,
+        len(df_out),
+        start_time,
+        {
+            "removed_rows": removed_rows,
+            "removed_runner_ids": removed_runner_ids,
+            "changed_rows": changed_rows,
+        },
+    )
+
+    return df_out
+
 
 # =============================================================================
 # Оркестратор
@@ -790,6 +1100,7 @@ def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd
 class Preprocessor:
     def __init__(self, config: dict[str, Any]) -> None:
         preprocessing_config = config.get("preprocessing", {})
+        self.dumping_info = config.get("dumping_info", {})
         self.age_center = float(preprocessing_config.get("age_center", 35.0))
         self.age_scale = float(preprocessing_config.get("age_scale", 10.0))
 
@@ -802,13 +1113,16 @@ class Preprocessor:
             .pipe(validate_input)
             .pipe(ensure_optional_columns)
             .pipe(normalize_core_strings)
+            .pipe(build_person_base_key)
+            .pipe(compute_approx_birth_year)
+            .pipe(stabilize_birth_year)
             .pipe(assign_runner_id)
-            .pipe(normalize_city_names)
+            .pipe(normalize_city_names, dumping_info=self.dumping_info)
             .pipe(fill_city_within_runner)
+            .pipe(split_runner_id_by_city_when_conflicted)
+            .pipe(fix_gender_by_majority, dumping_info=self.dumping_info)
             .pipe(deduplicate_strict)
-            .pipe(flag_soft_duplicates)
-            .pipe(drop_soft_duplicates)  # TODO: вернуть позже через кластеризацию однофамильцев
-            .pipe(flag_soft_duplicates)
+            .pipe(drop_ambiguous_event_multi)
             .pipe(add_features, age_center=self.age_center, age_scale=self.age_scale)
         )
 

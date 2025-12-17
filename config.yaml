@@ -13,8 +13,8 @@ preprocessing:
 references:
   top_fraction: 0.05       # Доля лучших финишёров для эталона (топ-5%)
   trim_fraction: 0.0      # Симметричная обрезка внутри топа
-  min_group_size: 3       # Минимальный размер группы (race_id, gender)
-  min_used_runners: 3      # Минимум наблюдений после top/trim
+  min_group_size: 10       # Минимальный размер группы (race_id, gender)
+  min_used_runners: 10      # Минимум наблюдений после top
   bootstrap_samples: 500   # Число bootstrap-выборок для оценки дисперсии
   random_seed: 123         # Seed для воспроизводимости
 
@@ -36,3 +36,4 @@ raw_filter:
   race_ids: null                 # ["Белые ночи", ...] или null
   years: null                   # [2016,2017,...] или null
 
+dumping_info: true

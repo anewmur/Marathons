@@ -25,8 +25,8 @@ from pathlib import Path
 
 def save_trace_references_xlsx(
     references_df: pd.DataFrame,
-    output_path: str | Path,
-) -> Path:
+    output_path: str | Path) -> Path:
+
     output_file = Path(output_path)
     if output_file.suffix.lower() != ".xlsx":
         raise ValueError("output_path must end with .xlsx")
@@ -219,17 +219,20 @@ class TraceReferenceBuilder:
 
         sorted_times = np.sort(times)
 
-        # Top fraction
-        top_size = int(np.ceil(sorted_times.size * self.top_fraction))
+        n_total = int(sorted_times.size)
+
+        # top_size должен быть не меньше min_used_runners, если это возможно
+        top_size_fraction = int(np.ceil(n_total * self.top_fraction))
+        top_size = min(n_total, max(top_size_fraction, self.min_used_runners))
         if top_size < 1:
             return None, 0
 
         top_times = sorted_times[:top_size]
 
-        # Trim
         used_times = self._apply_trim(top_times)
 
-        if used_times.size < self.min_used_runners:
+        # ВАЖНО: после trim всё ещё может стать меньше min_used_runners, тогда уже ничего не сделать
+        if used_times.size < min(self.min_used_runners, n_total):
             return None, int(used_times.size)
 
         reference_time = float(np.median(used_times))
@@ -261,9 +264,12 @@ class TraceReferenceBuilder:
 
         rng = np.random.default_rng(self.random_seed)
 
+        n_total = int(times.size)
+        if n_total == 0:
+            return 0.0
 
         # Генерируем ВСЕ индексы разом: матрица (n_bootstrap, n)
-        indices = rng.integers(0, times.size, size=(self.bootstrap_samples, times.size))
+        indices = rng.integers(0, n_total, size=(self.bootstrap_samples, n_total))
 
         # Получаем все bootstrap-выборки разом
         all_resamples = times[indices]  # shape: (n_bootstrap, n)
@@ -272,7 +278,8 @@ class TraceReferenceBuilder:
         all_sorted = np.sort(all_resamples, axis=1)
 
         # Top fraction — берём первые top_size элементов каждой строки
-        top_size = int(round(times.size * self.top_fraction))
+        top_size_fraction = int(np.ceil(n_total * self.top_fraction))
+        top_size = min(n_total, max(top_size_fraction, self.min_used_runners))
         if top_size < 1:
             return 0.0
 
@@ -286,7 +293,8 @@ class TraceReferenceBuilder:
             all_trimmed = all_top
 
         # Проверяем что осталось достаточно данных
-        if all_trimmed.shape[1] < self.min_used_runners:
+        min_required = min(self.min_used_runners, n_total)
+        if all_trimmed.shape[1] < min_required:
             return 0.0
 
         # Медианы всех выборок — векторно по axis=1
