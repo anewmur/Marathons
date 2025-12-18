@@ -36,7 +36,7 @@ def test_fit_gender_produces_model_and_beta_is_finite() -> None:
         {
             "gender": ["M"] * int(len(ages)),
             "age": ages.astype(float),
-            "z": z_values.astype(float),
+            "Z": z_values.astype(float),
         }
     )
 
@@ -58,3 +58,27 @@ def test_fit_gender_produces_model_and_beta_is_finite() -> None:
     if beta_series.index.tolist() != expected_names:
         raise RuntimeError("coef_beta index is not spline_0..spline_{K-1}")
 
+
+def test_fitter() -> None:
+    """
+    Точка входа для ручного прогона smoke-тестов.
+    """
+
+
+    tests: list[tuple[str, callable]] = [
+        ("test_fit_gender_produces_model_and_beta_is_finite",
+         test_fit_gender_produces_model_and_beta_is_finite),
+    ]
+
+    for test_name, test_fn in tests:
+        print(f"\n== Running: {test_name}")
+        try:
+            test_fn()
+            print(f"PASSED: {test_name}")
+        except Exception as e:
+            print(f"FAILED: {test_name}")
+            print(f"Error: {e}")
+            raise
+
+    print("\n" + "=" * 60)
+    print("=" * 60)

@@ -116,3 +116,32 @@ def test_centering_constraints_hold_for_random_gamma() -> None:
 
     assert abs(value_at_x0) < 1e-9
     assert abs(deriv_at_x0) < 1e-9
+
+
+def test_centoring() -> None:
+    """
+    Точка входа для ручного прогона smoke-тестов.
+    """
+
+
+    tests: list[tuple[str, callable]] = [
+        ("test_solve_penalized_lsq_preserves_constraints_when_beta_is_C_gamma",
+         test_solve_penalized_lsq_preserves_constraints_when_beta_is_C_gamma),
+        ("test_centering_matrix_shapes_and_null_properties",
+         test_centering_matrix_shapes_and_null_properties),
+        ("test_centering_constraints_hold_for_random_gamma",
+         test_centering_constraints_hold_for_random_gamma),
+    ]
+
+    for test_name, test_fn in tests:
+        print(f"\n== Running: {test_name}")
+        try:
+            test_fn()
+            print(f"PASSED: {test_name}")
+        except Exception as e:
+            print(f"FAILED: {test_name}")
+            print(f"Error: {e}")
+            raise
+
+    print("\n" + "=" * 60)
+    print("=" * 60)

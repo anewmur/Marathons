@@ -683,8 +683,6 @@ class MarathonModel:
 
         train_frame = train_frame.dropna(subset=required_columns).copy()
         return train_frame
-
-
     def fit_age_model(self) -> "MarathonModel":
         """
             - берёт train_frame_loy (уже OK и без validation_year)

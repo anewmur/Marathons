@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from spline_model.spline_tests.test_centering import (
-    test_centering_matrix_shapes_and_null_properties,
-    test_centering_constraints_hold_for_random_gamma,
-    test_solve_penalized_lsq_preserves_constraints_when_beta_is_C_gamma,
-)
-from spline_model.spline_tests.test_fitter import test_fit_gender_produces_model_and_beta_is_finite
-
-from spline_model.spline_tests.test_spline import test_build_raw_basis_partition_of_unity, \
-    test_solve_penalized_lsq_recovers_gamma_when_lambda_zero
+from spline_model.spline_tests.test_centering import test_centoring
+from spline_model.spline_tests.test_fitter import test_fitter
+from spline_model.spline_tests.test_predict import test_predict
+from spline_model.spline_tests.test_spline import test_spline
 from spline_model.spline_tests.test_real_data import test_real_data
 
 class _OnlyLevelFilter(logging.Filter):
@@ -59,15 +54,10 @@ def main() -> None:
     _configure_logging_debug_only()
 
     tests: list[tuple[str, callable]] = [
-        ("test_build_raw_basis_partition_of_unity", test_build_raw_basis_partition_of_unity),
-        ("test_centering_matrix_shapes_and_null_properties", test_centering_matrix_shapes_and_null_properties),
-        ("test_centering_constraints_hold_for_random_gamma", test_centering_constraints_hold_for_random_gamma),
-        ("test_fit_gender_produces_model_and_beta_is_finite", test_fit_gender_produces_model_and_beta_is_finite),
-
-        ("test_solve_penalized_lsq_recovers_gamma_when_lambda_zero",
-         test_solve_penalized_lsq_recovers_gamma_when_lambda_zero),
-        ("test_solve_penalized_lsq_preserves_constraints_when_beta_is_C_gamma",
-         test_solve_penalized_lsq_preserves_constraints_when_beta_is_C_gamma),
+        ("test_spline", test_spline),
+        ("test_centoring", test_centoring),
+        ("test_fitter", test_fitter),
+        ("test_predict", test_predict),
 
         # test real_data
 
