@@ -71,3 +71,28 @@ def test_solve_penalized_lsq_recovers_gamma_when_lambda_zero() -> None:
 
     max_abs_err = float(np.max(np.abs(gamma_hat - gamma_true)))
     assert max_abs_err < 1e-8
+
+
+def test_spline() -> None:
+    """
+    Точка входа для ручного прогона smoke-тестов.
+    """
+
+    tests: list[tuple[str, callable]] = [
+        ("test_build_raw_basis_partition_of_unity", test_build_raw_basis_partition_of_unity),
+        ("test_solve_penalized_lsq_recovers_gamma_when_lambda_zero",
+         test_solve_penalized_lsq_recovers_gamma_when_lambda_zero),
+    ]
+
+    for test_name, test_fn in tests:
+        print(f"\n== Running: {test_name}")
+        try:
+            test_fn()
+            print(f"PASSED: {test_name}")
+        except Exception as e:
+            print(f"FAILED: {test_name}")
+            print(f"Error: {e}")
+            raise
+
+    print("\n" + "=" * 60)
+    print("=" * 60)

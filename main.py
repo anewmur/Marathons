@@ -683,8 +683,6 @@ class MarathonModel:
 
         train_frame = train_frame.dropna(subset=required_columns).copy()
         return train_frame
-
-
     def fit_age_model(self) -> "MarathonModel":
         """
             - берёт train_frame_loy (уже OK и без validation_year)
@@ -758,6 +756,55 @@ class MarathonModel:
         """
         self._check_step("predict", ["preprocess", "build_trace_references"])
         return None
+
+    def predict_log_time(
+        self,
+        race_id: str,
+        gender: str,
+        age: float | np.ndarray,
+        year: int,
+    ) -> float | np.ndarray:
+        """
+        Полный прогноз лог-времени:
+        ln T_hat = ln R^{use}_{c,g}(year) + h_g(age).
+
+        Input:
+          - race_id: трасса
+          - gender: "M" или "F"
+          - age: возраст (скаляр или массив)
+          - year: год (нужен для явного контракта, сейчас эталон от года не зависит)
+        Returns:
+          - скаляр или массив ln T_hat
+        Does:
+          - берёт ln R^{use} через get_reference_log
+          - добавляет возрастную поправку predict_h
+        """
+        self._check_step("predict_log_time", ["build_trace_references"])
+
+        trace_references = getattr(self, "trace_references", None)
+        if trace_references is None or len(trace_references) == 0:
+            raise RuntimeError("predict_log_time: trace_references is missing or empty")
+
+        age_spline_models = getattr(self, "age_spline_models", None)
+        if age_spline_models is None or len(age_spline_models) == 0:
+            raise RuntimeError("predict_log_time: age_spline_models is missing or empty")
+
+        gender_key = str(gender)
+        if gender_key not in age_spline_models:
+            raise KeyError(f"predict_log_time: no age model for gender={gender_key}")
+
+        reference_log = get_reference_log(
+            trace_references=trace_references,
+            race_id=str(race_id),
+            gender=gender_key,
+            _year=int(year),
+        )
+        h_value = age_spline_models[gender_key].predict_h(age)
+
+        if isinstance(h_value, np.ndarray):
+            return h_value + float(reference_log)
+        return float(reference_log) + float(h_value)
+
 
     # ------------------------------------------------------------------
     # summary

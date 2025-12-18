@@ -31,12 +31,15 @@ def build_z_frame(
 
     if merged["reference_log"].isna().any():
         bad_rows = merged.loc[merged["reference_log"].isna(), ["race_id", "gender"]].drop_duplicates()
-        raise RuntimeError(f"Missing reference_log for some (race_id, gender):\n{bad_rows.to_string(index=False)}")
+        raise RuntimeError(
+            "Missing reference_log for some (race_id, gender):\n"
+            f"{bad_rows.to_string(index=False)}"
+        )
 
     merged = merged.copy()
-    merged["z"] = merged["Y"].astype(float) - merged["reference_log"].astype(float)
+    merged["Z"] = merged["Y"].astype(float) - merged["reference_log"].astype(float)
 
-    keep_cols = ["gender", "age", "z"]
+    keep_cols = ["gender", "age", "Z"]
     if "x" in merged.columns:
         keep_cols.append("x")
 

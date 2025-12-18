@@ -193,4 +193,128 @@ paths:
 REQUIRED_COLUMNS = ['name', 'surname', 'time']  # структура данных — ок в коде
 ```
 
-Эти правила готовы к использованию как чек-лист проекта. Внедряйте их постепенно, начиная с наиболее болезненных точек (обычно наблюдаемость, debug-интерфейс и row_id).
+---
+
+## 13. Тестирование
+
+### 13.1 Структура тестов
+
+Тесты располагаются в `spline_model/spline_tests/`:
+
+```
+spline_model/spline_tests/
+├── __init__.py
+├── tests_smoke.py      # точка входа, запускает все тесты
+├── test_spline.py      # тесты базиса и решателя
+├── test_centering.py   # тесты центрирования
+├── test_fitter.py      # тесты AgeSplineFitter
+├── test_predict.py     # тесты predict_h, predict_mean
+└── test_real_data.py   # интеграционные тесты на реальных данных
+```
+
+### 13.2 Типы тестов
+
+**Unit-тесты (на синтетических данных):**
+- Быстрые, детерминированные
+- Проверяют математические свойства (partition of unity, ограничения)
+- Не требуют реальных данных
+- Файлы: test_spline.py, test_centering.py, test_fitter.py, test_predict.py
+
+**Интеграционные тесты (на реальных данных):**
+- Требуют полный пайплайн MarathonModel
+- Проверяют сквозную работу на реальных данных
+- Файл: test_real_data.py
+
+### 13.3 Соглашения по написанию тестов
+
+**Имена функций:**
+```python
+def test_<что_тестируем>_<ожидаемое_поведение>() -> None:
+    """Краткое описание что проверяется."""
+    ...
+```
+
+**Структура теста:**
+```python
+def test_predict_h_at_age_center_is_near_zero() -> None:
+    """
+    Проверяет контракт центрирования: h(age_center) ≈ 0.
+    """
+    # 1. Подготовка данных
+    config = {...}
+    fitter = AgeSplineFitter(config=config)
+    df = pd.DataFrame({...})
+    
+    # 2. Выполнение
+    model = fitter.fit_gender(gender_df=df, gender="M")
+    h_at_center = model.predict_h(35.0)
+    
+    # 3. Проверка с raise RuntimeError (не assert!)
+    if abs(h_at_center) > 1e-8:
+        raise RuntimeError(f"h(35) should be ~0, got {h_at_center}")
+```
+
+**Использовать `raise RuntimeError`, а не `assert`:**
+- assert может быть отключен флагом -O
+- RuntimeError всегда работает и даёт понятное сообщение
+
+### 13.4 Тесты на реальных данных
+
+Тесты в test_real_data.py:
+- Принимают опциональный параметр `model=None`
+- Если model передан — используют его
+- Если нет — строят через `_real_data_build_model()`
+
+```python
+def test_real_data_predict_h_at_age_center_is_near_zero(model=None) -> None:
+    if model is None:
+        model = _real_data_build_model()
+    ...
+```
+
+**Точка входа `test_real_data()`:**
+```python
+def test_real_data() -> None:
+    model = _real_data_build_model()  # один раз
+    
+    tests = [
+        ("test_name_1", test_func_1),
+        ("test_name_2", test_func_2),
+    ]
+    
+    for test_name, test_fn in tests:
+        print(f"== Running: {test_name}")
+        test_fn(model=model)  # переиспользуем модель
+        print(f"PASSED: {test_name}")
+```
+
+### 13.5 Запуск тестов
+
+**Все smoke-тесты:**
+```bash
+python spline_model/spline_tests/tests_smoke.py
+```
+
+**Только unit-тесты (быстро):**
+```bash
+python -c "from spline_model.spline_tests.test_spline import *; test_spline()"
+```
+
+**Только интеграционные:**
+```bash
+python -c "from spline_model.spline_tests.test_real_data import test_real_data; test_real_data()"
+```
+
+### 13.6 Что тестировать
+
+**Обязательно:**
+- Математические инварианты (partition of unity, A·β=0)
+- Контракты центрирования (h(0)=0, h'(0)=0)
+- Конечность и корректность выходов (np.isfinite)
+- Формы массивов и типы возвращаемых значений
+
+**Sanity checks (с предупреждениями, не падают):**
+- Разумность формы кривой (h(30) < h(50) < h(70))
+- Диапазоны значений
+
+---

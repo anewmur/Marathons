@@ -97,7 +97,7 @@ Z_i = h_g(a_i) + ε_i
   - birth_year_stable
 
 ### 3.5 Формирование runner_id (контракт)
-runner_id — строковый идентификатор гипотезы “один физический человек”.
+runner_id — строковый идентификатор гипотезы "один физический человек".
 На базовом шаге runner_id строится из person_set_key и стабилизированного года рождения.
 
 Формат:
@@ -138,7 +138,7 @@ runner_id — строковый идентификатор гипотезы “
 Контракт после шага:
 - в df_clean внутри runner_id пол однозначен
 
-### 3.8 Удаление неразрешимых конфликтов “один старт”
+### 3.8 Удаление неразрешимых конфликтов "один старт"
 Ситуация:
 - у одного runner_id более одной строки в одном и том же (race_id, year)
 
@@ -194,25 +194,105 @@ ReferenceBuilder (TraceReferenceBuilder) строит эталон на шкал
 
 ## 5. Возрастная модель (ключевая часть)
 
-### fit_age_model
+### 5.1 Архитектура
 
-Вход:
-- df_clean
-- исключён validation_year (если задан)
-- status == OK
+Модуль: `spline_model/`
 
-Подготовка:
-- возраст уже приведён к age_clamped в предобработке и именно он используется в x
-- вычисляем Z = Y − ln R^{use}_{c,g}(j) для каждой строки
+Основные классы:
+- `AgeSplineFitter` — обучение модели (age_spline_fit.py)
+- `AgeSplineModel` — хранение параметров и предсказание (age_spline_model.py)
 
-Оценка:
-- отдельно по каждому полу g
-- оцениваем h_g(a) как сглаженную функцию (сплайн)
-- оцениваем σ_g^2
+Вспомогательные модули:
+- `build_centering_matrix.py` — построение матриц ограничений (A, C)
+- `z_frame.py` — построение Z-фрейма
 
-Выход:
-- параметры сплайна h_g
-- оценка σ_g^2
+### 5.2 Математическая спецификация
+
+Модель на шкале Z:
+```
+Z = h_g(a) + ε,  ε ~ N(0, σ²)
+```
+
+Сплайновая функция:
+```
+h_g(a) = Σ β_k · B_k(x),  где x = (age - age_center) / age_scale
+```
+
+Ограничения центрирования (в точке x₀ = 0, т.е. age = age_center):
+- h(0) = 0  (значение)
+- h'(0) = 0 (производная)
+
+Параметризация:
+- B_raw: исходный B-сплайновый базис размера (n, K_raw)
+- A: матрица ограничений размера (2, K_raw)
+- C: базис нуль-пространства A, размера (K_raw, K_cent), где K_cent = K_raw - 2
+- β = C · γ — редуцированная параметризация, автоматически удовлетворяющая A·β = 0
+
+Штраф P-spline:
+```
+penalty = λ · ||D·β||² = λ · β' · (D'D) · β
+```
+где D — матрица вторых разностей.
+
+### 5.3 Поток данных возрастной модели
+
+```
+train_frame_loy (status=OK, year≠validation_year)
+    ↓
+build_z_frame() → z_frame с колонками (gender, age, Z)
+    ↓
+AgeSplineFitter.fit(z_frame) → dict[gender, AgeSplineModel]
+    ↓
+Для каждого пола:
+    1. _compute_x_std_and_clamped_age() → x = (age - 35) / 10
+    2. build_knots_x() → узлы по квантилям в шкале x
+    3. build_raw_basis() → B_raw (n, K_raw)
+    4. build_centering_matrix() → (A, C)
+    5. build_second_difference_matrix() → D
+    6. solve_penalized_lsq() → β = C·γ
+    7. _assemble_model() → AgeSplineModel
+```
+
+### 5.4 Ключевые функции (реализованы ✅)
+
+| Функция | Файл | Назначение |
+|---------|------|------------|
+| `build_knots_x` | age_spline_fit.py | Квантильные узлы с детерминированным слиянием |
+| `build_raw_basis` | age_spline_fit.py | B-сплайновый базис через BSpline.design_matrix |
+| `build_second_difference_matrix` | age_spline_fit.py | Матрица D для P-spline штрафа |
+| `build_centering_matrix` | build_centering_matrix.py | Матрицы (A, C) через SVD |
+| `solve_penalized_lsq` | age_spline_fit.py | Решение в редуцированной параметризации |
+| `build_z_frame` | z_frame.py | Построение Z = Y - ln(R^use) |
+| `AgeSplineFitter.fit_gender` | age_spline_fit.py | Обучение для одного пола |
+| `AgeSplineFitter.fit` | age_spline_fit.py | Обучение для всех полов |
+| `AgeSplineModel.predict_h` | age_spline_model.py | Предсказание h(age) |
+| `AgeSplineModel.predict_mean` | age_spline_model.py | Предсказание μ + γx + h(x) |
+| `AgeSplineModel.design_row` | age_spline_model.py | Строка дизайн-матрицы для диагностики |
+
+### 5.5 Конфигурация (config.yaml)
+
+```yaml
+preprocessing:
+  age_center: 35.0      # центр нормировки возраста
+  age_scale: 10.0       # масштаб нормировки
+
+age_spline_model:
+  age_min_global: 18.0  # глобальный минимум возраста (clamp)
+  age_max_global: 80.0  # глобальный максимум возраста (clamp)
+  degree: 3             # степень сплайна (кубический)
+  max_inner_knots: 6    # максимум внутренних узлов
+  min_knot_gap: 0.2     # минимальный шаг между узлами в шкале x
+  lambda_value: 1.0     # параметр гладкости (фиксированный)
+  centering_tol: 1e-10  # допуск на проверку ограничений
+```
+
+### 5.6 Текущие метрики (реальные данные)
+
+- Обучающая выборка: n_M = 29450, n_F = 6755
+- Базис: K_raw = 12 (M), K_raw = 13 (F)
+- Центрирование: h(35) ≈ 4e-17 (машинная точность)
+- Partition of unity: max_err ≈ 2e-16
+- Время обучения: ~0.08 сек на оба пола
 
 ---
 
@@ -226,8 +306,7 @@ ReferenceBuilder (TraceReferenceBuilder) строит эталон на шкал
 
 Шаги:
 1) берём ln R^{use}_{c,g} для пары (race_id, gender) из таблицы эталонов
-   (годовая зависимость эталона в текущей реализации не используется)
-2) вычисляем h_g(a)
+2) вычисляем h_g(a) через AgeSplineModel.predict_h(age)
 3) Y_pred = ln R^{use} + h_g(a)
 4) переводим в секунды: T_pred = exp(Y_pred)
 5) интервалы: считаем на Y-шкале с учётом σ_g^2, затем exp(·)
@@ -243,33 +322,74 @@ ReferenceBuilder (TraceReferenceBuilder) строит эталон на шкал
 
 ---
 
-## Что уже реализовано
+## Что уже реализовано ✅
 
+**Предобработка:**
 - полный пайплайн предобработки до df_clean
 - person_set_key, approx_birth_year
 - кластеризация годов рождения внутри person_set_key и birth_year_stable
 - runner_id в фиксированном формате
 - нормализация/заполнение города и разбиение runner_id по конфликтному city
-- исправление пола по большинству (или удаление при отсутствии большинства) [если добавлено в код]
-- удаление неразрешимых мульти-стартов (один runner_id, один race_id, один year, >1 строк)
+- исправление пола по большинству
+- удаление неразрешимых мульти-стартов
 - построение трассовых эталонов
-- инфраструктура/каркас fit_age_model с диагностикой
+
+**Возрастная модель:**
+- Полный пайплайн B-сплайна с P-spline штрафом
+- Центрирование h(0)=0, h'(0)=0 через редуцированную параметризацию
+- AgeSplineFitter.fit() для обоих полов
+- AgeSplineModel.predict_h() для предсказания
+- Тесты на синтетике и реальных данных
 
 ---
 
 ## Что осталось реализовать
 
-1) Реальная оценка сплайна h_g(a)
-2) Хранение параметров сплайна и применение на новых данных
-3) Прогноз с неопределённостью (интервалы)
-4) Блок валидации (метрики, отчёты)
-5) Финальные дампы/отчёты для контроля качества данных и модели
+1) **select_lambda_gcv** — автоматический выбор λ по GCV
+2) **MarathonModel.predict_log_time()** — полный прогноз ln R^use + h(age)
+3) **Линейная часть модели** — добавить μ и γ (coef_mu, coef_gamma)
+4) **compute_tau2_bar** — средняя дисперсия эталона
+5) **apply_winsor** — винзоризация выбросов
+6) **determine_degradation** — деградация при малых данных
+7) **Прогноз с неопределённостью** — интервалы через Монте-Карло
+8) **save/load_age_spline_models** — сериализация моделей
+9) **Блок валидации** — метрики, отчёты
 
 ---
 
 ## Принципиальные позиции проекта
 
-- идентификация людей: только детерминированные правила, без “умных” кластеризаций
-- возраст: только гладкая функция (сплайн), а не дискретные “возрастные эталоны”
+- идентификация людей: только детерминированные правила, без "умных" кластеризаций
+- возраст: только гладкая функция (сплайн), а не дискретные "возрастные эталоны"
 - допускается удаление строк и целых runner_id при неразрешимых конфликтах
-  (это сознательная политика качества данных, а не “ошибка пайплайна”)
+  (это сознательная политика качества данных, а не "ошибка пайплайна")
+- единая шкала x_std = (age - age_center) / age_scale во всей модели
+- центрирование в точке x=0 (age=35) для интерпретируемости параметров
+
+
+### 13.7 Текущие тесты
+
+| Файл | Тесты | Что проверяют |
+|------|-------|---------------|
+| test_spline.py | test_build_raw_basis_partition_of_unity | Σ B_k(x) = 1 |
+| test_spline.py | test_solve_penalized_lsq_recovers_gamma_when_lambda_zero | λ=0 → OLS |
+| test_centering.py | test_centering_matrix_shapes_and_null_properties | A·C=0, rank(C)=K-2 |
+| test_centering.py | test_centering_constraints_hold_for_random_gamma | β=C·γ → A·β=0 |
+| test_centering.py | test_solve_penalized_lsq_preserves_constraints | Решение удовлетворяет A·β≈0 |
+| test_fitter.py | test_fit_gender_produces_model_and_beta_is_finite | fit_gender работает |
+| test_predict.py | test_predict_h_at_age_center_is_near_zero | h(35) ≈ 0 |
+| test_predict.py | test_predict_h_returns_finite_across_age_range | Конечность на [18,80] |
+| test_predict.py | test_predict_h_scalar_vs_array_consistent | Скаляр = массив |
+| test_predict.py | test_predict_h_clamps_age_outside_bounds | h(10)=h(18), h(100)=h(80) |
+| test_predict.py | test_predict_mean_equals_predict_h_when_mu_gamma_zero | m=h при μ=γ=0 |
+| test_predict.py | test_design_row_returns_correct_structure | Структура словаря |
+| test_real_data.py | test_real_data_prepare_z_frame | x_std, partition of unity |
+| test_real_data.py | test_real_data_train_frame_has_Z | Колонка Z существует |
+| test_real_data.py | test_real_data_solve_penalized_lsq_runs_and_preserves_centering | A·β≈0 на реальных |
+| test_real_data.py | test_real_data_fit_gender_runs_and_preserves_centering | fit_gender на реальных |
+| test_real_data.py | test_real_data_predict_h_at_age_center_is_near_zero | h(35)≈0 на реальных |
+| test_real_data.py | test_real_data_predict_h_is_finite_across_age_range | Конечность |
+| test_real_data.py | test_real_data_predict_h_clamps_correctly | Clamp на реальных |
+| test_real_data.py | test_real_data_predict_h_monotonic_after_peak | Sanity check формы |
+| test_real_data.py | test_real_data_fit_both_genders | fit() для M и F |
+| test_real_data.py | test_real_data_fit_report_contains_required_fields | Поля fit_report |

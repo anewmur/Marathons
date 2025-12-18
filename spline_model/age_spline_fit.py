@@ -6,6 +6,7 @@
 - Вспомогательные функции для построения узлов, базиса, центрирования, оценки параметров
 """
 import math
+import time
 
 from typing import Any
 from scipy.interpolate import BSpline
@@ -14,6 +15,7 @@ import pandas as pd
 import logging
 
 from spline_model.build_centering_matrix import build_centering_matrix
+from spline_model.select_lambda_reml import select_lambda_reml
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +219,7 @@ def solve_penalized_lsq(
     где P = penalty_matrix_raw (на beta), а P_cent = C^T P C (на gamma).
 
     Args:
-        b_raw: (n, K_raw) дизайн-матрица базисов
+        b_raw: (n, K_raw) дизайн-матрица базисов ( матрица объясняющих переменных)
         y: (n,) вектор отклика
         null_basis: C, shape (K_raw, K_cent)
         penalty_matrix_raw: P, shape (K_raw, K_raw)
@@ -274,30 +276,130 @@ def solve_penalized_lsq(
     }
 
 
-def select_lambda_gcv(
-    W: np.ndarray,
-    z: np.ndarray,
-    lambda_grid: np.ndarray,
-    penalty_idx: list[int]
-) -> tuple[float, dict[str, Any]]:
-    """
-    Выбор λ по GCV (Generalized Cross-Validation).
-    
-    Args:
-        W: Дизайн-матрица (n, p)
-        z: Целевая переменная (n,)
-        lambda_grid: Сетка значений λ для перебора
-        penalty_idx: Индексы столбцов для штрафа
-    
-    Returns:
-        Кортеж (best_lambda, info):
-        - best_lambda: оптимальное значение λ
-        - info: словарь с "gcv_values", "edf_values" и др.
-    
-    Raises:
-        NotImplementedError: Будет реализовано в Этапе 4
-    """
-    raise NotImplementedError("select_lambda_gcv будет реализован в Этапе 4")
+# def select_lambda_gcv(
+#     W: np.ndarray,
+#     z: np.ndarray,
+#     lambda_grid: np.ndarray,
+#     penalty_idx: list[int]
+# ) -> tuple[float, dict[str, Any]]:
+#     """
+#     Выбор λ по GCV (Generalized Cross-Validation).
+#
+#     Args:
+#         W: Дизайн-матрица (n, p)
+#         z: Целевая переменная (n,)
+#         lambda_grid: Сетка значений λ для перебора
+#         penalty_idx: Индексы столбцов для штрафа
+#
+#     Returns:
+#         Кортеж (best_lambda, info):
+#         - best_lambda: оптимальное значение λ
+#         - info: словарь с "gcv_values", "edf_values" и др.
+#
+#     Замечания по реализации:
+#     - Штраф задаётся как ridge только на подмножестве коэффициентов.
+#       Это сознательно: сейчас нам нужно надёжное и простое GCV для выбора λ.
+#       P-сплайн штраф D^T D живёт уровнем выше (в solve_penalized_lsq).
+#     - EDF считаем как trace(H), где H = W (W^T W + λP)^{-1} W^T.
+#       Не строим H явно: trace(H) = trace((W^T W + λP)^{-1} (W^T W)).
+#     - Критерий GCV: n * RSS / (n - EDF)^2.
+#     """
+#     W_array = np.asarray(W, dtype=float)
+#     z_array = np.asarray(z, dtype=float).reshape(-1)
+#     grid = np.asarray(lambda_grid, dtype=float).reshape(-1)
+#
+#     if W_array.ndim != 2:
+#         raise ValueError("select_lambda_gcv: W must be 2D")
+#     if z_array.ndim != 1:
+#         raise ValueError("select_lambda_gcv: z must be 1D")
+#     if W_array.shape[0] != z_array.shape[0]:
+#         raise ValueError("select_lambda_gcv: W row count must match z length")
+#     if grid.size == 0:
+#         raise ValueError("select_lambda_gcv: lambda_grid is empty")
+#     if not np.isfinite(W_array).all():
+#         raise ValueError("select_lambda_gcv: W contains non-finite values")
+#     if not np.isfinite(z_array).all():
+#         raise ValueError("select_lambda_gcv: z contains non-finite values")
+#     if not np.isfinite(grid).all():
+#         raise ValueError("select_lambda_gcv: lambda_grid contains non-finite values")
+#     if np.any(grid < 0.0):
+#         raise ValueError("select_lambda_gcv: lambda_grid must be >= 0")
+#
+#     n_obs = int(W_array.shape[0])
+#     param_count = int(W_array.shape[1])
+#     if n_obs <= 0:
+#         raise ValueError("select_lambda_gcv: n must be > 0")
+#     if param_count <= 0:
+#         raise ValueError("select_lambda_gcv: p must be > 0")
+#
+#     penalty_mask = np.zeros(param_count, dtype=float)
+#     for column_index in penalty_idx:
+#         if not isinstance(column_index, int):
+#             raise ValueError("select_lambda_gcv: penalty_idx must contain ints")
+#         if column_index < 0 or column_index >= param_count:
+#             raise ValueError(
+#                 "select_lambda_gcv: penalty_idx out of bounds "
+#                 f"(idx={column_index}, p={param_count})"
+#             )
+#         penalty_mask[column_index] = 1.0
+#
+#     penalty_matrix = np.diag(penalty_mask)
+#     wtw = W_array.T @ W_array
+#     wtz = W_array.T @ z_array
+#
+#     gcv_values: list[float] = []
+#     edf_values: list[float] = []
+#     rss_values: list[float] = []
+#
+#     best_lambda = float(grid[0])
+#     best_gcv = float("inf")
+#     best_beta: np.ndarray | None = None
+#
+#     for lambda_value in grid.tolist():
+#         lam = float(lambda_value)
+#
+#         system_matrix = wtw + lam * penalty_matrix
+#         beta = np.linalg.solve(system_matrix, wtz)
+#
+#         fitted = W_array @ beta
+#         residual = z_array - fitted
+#         rss = float(residual.T @ residual)
+#
+#         inverse_times_wtw = np.linalg.solve(system_matrix, wtw)
+#         edf = float(np.trace(inverse_times_wtw))
+#
+#         if edf < 0.0:
+#             edf = 0.0
+#         if edf > float(param_count):
+#             edf = float(param_count)
+#
+#         denom = float(n_obs - edf)
+#         if denom <= 0.0:
+#             gcv = float("inf")
+#         else:
+#             gcv = float(n_obs) * rss / (denom * denom)
+#
+#         gcv_values.append(gcv)
+#         edf_values.append(edf)
+#         rss_values.append(rss)
+#
+#         if gcv < best_gcv:
+#             best_gcv = gcv
+#             best_lambda = lam
+#             best_beta = beta
+#
+#     if best_beta is None:
+#         raise RuntimeError("select_lambda_gcv: failed to select lambda")
+#
+#     info: dict[str, Any] = {
+#         "lambda_grid": grid.copy(),
+#         "gcv_values": np.asarray(gcv_values, dtype=float),
+#         "edf_values": np.asarray(edf_values, dtype=float),
+#         "rss_values": np.asarray(rss_values, dtype=float),
+#         "best_gcv": float(best_gcv),
+#         "best_beta": np.asarray(best_beta, dtype=float),
+#     }
+#     return best_lambda, info
 
 
 def compute_tau2_bar(
@@ -419,73 +521,82 @@ class AgeSplineFitter:
         Raises:
             KeyError: Если отсутствуют обязательные секции в config
         """
-        spline_config = config.get("age_spline_model", {})
-        preproc_config = config.get("preprocessing", {})
-        
+        self.config = config
+
+        preprocessing = config["preprocessing"]
+        age_model = config["age_spline_model"]
+
+
         # Нормировка возраста (из preprocessing)
-        self.age_center = float(preproc_config.get("age_center", 35))
-        self.age_scale = float(preproc_config.get("age_scale", 10))
+        self.age_center = float(preprocessing["age_center"])
+        self.age_scale = float(preprocessing["age_scale"])
         
         # Глобальные границы для clamp при обучении
-        self.age_min_global = float(spline_config.get("age_min_global", 18))
-        self.age_max_global = float(spline_config.get("age_max_global", 80))
+        self.age_min_global = float(age_model["age_min_global"])
+        self.age_max_global = float(age_model["age_max_global"])
         
         # B-сплайн параметры
-        self.degree = int(spline_config.get("degree", 3))
-        self.max_inner_knots = int(spline_config.get("max_inner_knots", 10))
-        self.min_knot_gap = float(spline_config.get("min_knot_gap", 0.2))
+        self.degree = int(age_model["degree"])
+        self.max_inner_knots = int(age_model["max_inner_knots"])
+        self.min_knot_gap = float(age_model["min_knot_gap"])
         
         # λ выбор
-        self.lambda_grid_log_min = float(spline_config.get("lambda_grid_log_min", -6))
-        self.lambda_grid_log_max = float(spline_config.get("lambda_grid_log_max", 2))
-        self.lambda_grid_n = int(spline_config.get("lambda_grid_n", 50))
-        self.lambda_method = str(spline_config.get("lambda_method", "GCV"))
-        
-        # Пороги деградации
-        self.n_min_spline = int(spline_config.get("n_min_spline", 300))
-        self.range_min_years = float(spline_config.get("range_min_years", 15))
-        self.n_min_linear = int(spline_config.get("n_min_linear", 80))
-        self.range_min_linear = float(spline_config.get("range_min_linear", 8))
-        
-        # Дисперсии
-        self.sigma2_floor = float(spline_config.get("sigma2_floor", 1e-8))
-        self.nu_floor = float(spline_config.get("nu_floor", 3.0))
-        
-        # Winsor
-        self.winsor_enabled = bool(spline_config.get("winsor_enabled", True))
-        self.winsor_k = float(spline_config.get("winsor_k", 3.0))
-        
-        # Диагностика
-        self.centering_tol = float(spline_config.get("centering_tol", 1e-10))
-        self.verbose_fit = bool(spline_config.get("verbose_fit", True))
-        
+        self.lambda_value = float(age_model.get("lambda_value", 0.0))
+        self.lambda_method = str(age_model.get("lambda_method", "fixed")).upper()
+
+        self.centering_tol = float(age_model.get("centering_tol", 1e-10))
+
         logger.info(
-            "AgeSplineFitter initialized: age_center=%.1f, age_scale=%.1f, "
-            "degree=%d, lambda_method=%s",
-            self.age_center, self.age_scale, self.degree, self.lambda_method
+            "AgeSplineFitter initialized: age_center=%s, age_scale=%s, degree=%s, lambda_method=%s",
+            self.age_center,
+            self.age_scale,
+            self.degree,
+            self.lambda_method,
         )
 
     def fit(self, df: pd.DataFrame) -> dict[str, AgeSplineModel]:
         """
-        Обучить возрастной сплайн отдельно для каждого пола.
+       Строит модели возрастного сплайна по всем полам из df.
 
-        Контракт:
-        - df содержит gender, age, z
-        - df не пуст и не содержит NA в этих колонках
-
-        Возвращает:
-        - dict: {"M": AgeSplineModel, "F": AgeSplineModel} (если оба пола есть)
+        Принимает: df с колонками gender, age, Z (Z вычислен заранее).
+        Возвращает: dict[gender, AgeSplineModel].
+        Делает: валидирует вход, режет по полу, зовёт fit_gender для каждого пола.
         """
-        self._validate_fit_input(df)
+        start_time = time.time()
 
-        genders = sorted(df["gender"].astype(str).unique().tolist())
+        work_df = self._validate_fit_input(df=df)
+        genders = self._get_sorted_genders(df=work_df)
+
         models: dict[str, AgeSplineModel] = {}
-
         for gender in genders:
-            gender_df = df.loc[df["gender"].astype(str) == gender].copy()
-            models[gender] = self.fit_gender(gender_df=gender_df, gender=gender)
+            gender_df = work_df.loc[work_df["gender"] == gender, ["gender", "age", "Z"]].copy()
 
+            rows_in_gender = int(len(gender_df))
+            if rows_in_gender == 0:
+                raise RuntimeError(f"AgeSplineFitter.fit: empty gender slice for gender={gender}")
+
+            logger.info("fit_gender: gender=%s, n=%d", gender, rows_in_gender)
+            models[gender] = self.fit_gender(gender_df=gender_df, gender=str(gender))
+
+        elapsed_sec = float(time.time() - start_time)
+        logger.info(
+            "AgeSplineFitter.fit: completed genders=%s in %.3fs",
+            list(models.keys()),
+            elapsed_sec,
+        )
         return models
+
+    def _get_sorted_genders(self, df: pd.DataFrame) -> list[str]:
+        """
+        Принимает: df с колонкой gender.
+        Возвращает: список полов в детерминированном порядке.
+        Делает: нормализует тип к str и сортирует так, чтобы M шёл перед F если оба есть.
+        """
+        genders_raw = df["gender"].astype(str).unique().tolist()
+        genders = [str(value) for value in genders_raw]
+
+        order = {"M": 0, "F": 1}
+        return sorted(genders, key=lambda item: (order.get(item, 99), item))
 
     def fit_gender(self, gender_df: pd.DataFrame, gender: str) -> "AgeSplineModel":
         """
@@ -515,7 +626,13 @@ class AgeSplineFitter:
 
         penalty_matrix_raw = self._build_penalty_matrix_raw(b_raw)
 
-        lambda_value = self._get_lambda_value()
+        lambda_value, reml_terms = self._select_lambda_value(
+            b_raw=b_raw,
+            y=z_values,
+            null_basis=null_basis_C,
+            penalty_matrix_raw=penalty_matrix_raw,
+        )
+
         solution = self._solve(
             b_raw=b_raw,
             y=z_values,
@@ -525,7 +642,6 @@ class AgeSplineFitter:
         )
 
         beta = np.asarray(solution["beta"], dtype=float)
-        gamma = np.asarray(solution["gamma"], dtype=float)
 
         self._assert_constraints(constraints_matrix=constraints_matrix_A, beta=beta)
 
@@ -541,24 +657,33 @@ class AgeSplineFitter:
             lambda_value=lambda_value,
             age_range_actual=age_range_actual,
             sample_size=int(len(z_values)),
+            reml_terms=reml_terms,
         )
         return model
 
-    def _validate_fit_input(self, df: pd.DataFrame) -> None:
-        required_columns = ["gender", "age", "z"]
+    def _validate_fit_input(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Принимает: df.
+        Возвращает: копию df (минимально очищенную).
+        Делает: проверяет наличие нужных колонок и отсутствие NA в них.
+        """
+        required_columns = ["gender", "age", "Z"]
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
-            raise ValueError(f"fit: missing required columns: {missing_columns}")
+            raise ValueError(f"AgeSplineFitter.fit: missing columns: {missing_columns}")
 
         if df.empty:
-            raise ValueError("fit: df is empty")
+            raise ValueError("AgeSplineFitter.fit: df is empty")
 
-        if df[required_columns].isna().any().any():
-            na_share = df[required_columns].isna().mean().to_dict()
-            raise ValueError(f"fit: df has NA in required columns: {na_share}")
+        work_df = df[required_columns].copy()
+        if work_df.isna().any().any():
+            na_share = work_df.isna().mean().to_dict()
+            raise ValueError(f"AgeSplineFitter.fit: NA in required columns: {na_share}")
+
+        return work_df
 
     def _validate_fit_gender_input(self, gender_df: pd.DataFrame, gender: str) -> None:
-        required_columns = ["age", "z"]
+        required_columns = ["age", "Z"]
         missing_columns = [col for col in required_columns if col not in gender_df.columns]
         if missing_columns:
             raise ValueError(f"fit_gender: missing required columns: {missing_columns}")
@@ -573,7 +698,7 @@ class AgeSplineFitter:
     @staticmethod
     def _extract_age_and_z(gender_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         ages_raw = gender_df["age"].astype(float).to_numpy(dtype=float)
-        z_values = gender_df["z"].astype(float).to_numpy(dtype=float)
+        z_values = gender_df["Z"].astype(float).to_numpy(dtype=float)
 
         if not np.isfinite(ages_raw).all():
             raise RuntimeError("_extract_age_and_z: ages contain non-finite values")
@@ -655,11 +780,45 @@ class AgeSplineFitter:
         penalty_matrix_raw = difference_matrix.T @ difference_matrix
         return penalty_matrix_raw
 
-    def _get_lambda_value(self) -> float:
-        lambda_value = float(getattr(self, "lambda_value", 1.0))
-        if not (lambda_value >= 0.0):
-            raise ValueError(f"_get_lambda_value: lambda_value must be >= 0, got {lambda_value}")
-        return lambda_value
+    def _select_lambda_value(
+            self,
+            b_raw: np.ndarray,
+            y: np.ndarray,
+            null_basis: np.ndarray,
+            penalty_matrix_raw: np.ndarray,
+    ) -> tuple[float, dict[str, Any] | None]:
+        method = str(getattr(self, "lambda_method", "FIXED")).upper()
+
+        if method == "FIXED":
+            lambda_value = float(getattr(self, "lambda_value", 1.0))
+            if not np.isfinite(lambda_value) or lambda_value < 0.0:
+                raise ValueError(f"_select_lambda_value: lambda_value must be finite and >= 0, got {lambda_value}")
+            return float(lambda_value), None
+
+        if method == "REML":
+            b_raw_array = np.asarray(b_raw, dtype=float)
+            y_array = np.asarray(y, dtype=float).reshape(-1)
+            C = np.asarray(null_basis, dtype=float)
+            P_raw = np.asarray(penalty_matrix_raw, dtype=float)
+
+            W_cent = b_raw_array @ C
+            P_cent = C.T @ P_raw @ C
+
+            best_lambda, info = select_lambda_reml(
+                W=W_cent,
+                y=y_array,
+                penalty_matrix=P_cent,
+            )
+
+            best_terms = info.get("best_terms")
+            if not isinstance(best_terms, dict):
+                raise RuntimeError(f"_select_lambda_value: REML best_terms missing or invalid: {best_terms}")
+            if not bool(best_terms.get("ok")):
+                raise RuntimeError(f"_select_lambda_value: REML best_terms not ok: {best_terms}")
+
+            return float(best_lambda), best_terms
+
+        raise ValueError(f"_select_lambda_value: unknown lambda_method={method}")
 
     @staticmethod
     def _solve(
@@ -700,6 +859,7 @@ class AgeSplineFitter:
             lambda_value: float,
             age_range_actual: tuple[float, float],
             sample_size: int,
+            reml_terms: dict[str, Any] | None,
     ) -> "AgeSplineModel":
         """
         Собрать AgeSplineModel под твой текущий класс.
@@ -736,6 +896,20 @@ class AgeSplineFitter:
         beta_names = [f"spline_{index}" for index in range(int(beta_np.size))]
         coef_beta = pd.Series(beta_np, index=beta_names, dtype=float)
 
+        lambda_method = str(getattr(self, "lambda_method", "FIXED")).upper()
+
+        report_edf: float | None = None
+        report_nu: float | None = None
+        report_sigma2: float | None = None
+
+        if lambda_method == "REML":
+            if reml_terms is None:
+                raise RuntimeError("_assemble_model: lambda_method=REML but reml_terms is None")
+
+            report_edf = float(reml_terms["edf"])
+            report_nu = float(reml_terms["nu"])
+            report_sigma2 = float(reml_terms["sigma2_hat"])
+
         fit_report = {
             "n": int(sample_size),
             "age_range_actual": (float(age_range_actual[0]), float(age_range_actual[1])),
@@ -744,11 +918,16 @@ class AgeSplineFitter:
             "degree": int(degree),
             "K_raw": int(k_raw),
             "K_cent": int(k_cent),
+
             "lambda_value": float(lambda_value),
-            "lambda_method": "fixed",
+            "lambda_method": str(lambda_method),
+
+            "edf": report_edf,
+            "nu": report_nu,
+            "sigma2_reml": report_sigma2,
+
             "warnings": [],
         }
-
         return AgeSplineModel(
             gender=str(gender),
 
@@ -774,10 +953,11 @@ class AgeSplineFitter:
 
             # Дисперсии
             lambda_value=float(lambda_value),
-            sigma2_reml=0.0,
+            sigma2_reml=0.0 if report_sigma2 is None else float(report_sigma2),
+            nu=3.0 if report_nu is None else float(report_nu),
             tau2_bar=0.0,
             sigma2_use=0.0,
-            nu=3.0,
+
 
             # Winsor
             winsor_params={},

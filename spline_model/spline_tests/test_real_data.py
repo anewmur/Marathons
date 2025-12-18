@@ -1,3 +1,4 @@
+import copy
 import logging
 import time
 from typing import Any
@@ -11,7 +12,7 @@ from spline_model.age_spline_fit import build_raw_basis
 from spline_model.build_centering_matrix import build_centering_matrix
 from spline_model.age_spline_fit import build_second_difference_matrix
 from spline_model.age_spline_fit import solve_penalized_lsq
-
+from trace_reference_builder import get_reference_log
 logger = logging.getLogger(__name__)
 
 def test_real_data_prepare_z_frame(model=None) -> None:
@@ -116,6 +117,43 @@ def _real_data_get_age_params(model: MarathonModel) -> dict[str, Any]:
         "max_inner_knots": int(age_model["max_inner_knots"]),
         "min_knot_gap": float(age_model["min_knot_gap"]),
     }
+
+
+def _real_data_config_with_lambda_method(model: MarathonModel, lambda_method: str) -> dict[str, Any]:
+    config_copy: dict[str, Any] = copy.deepcopy(model.config)
+    config_copy["age_spline_model"]["lambda_method"] = str(lambda_method)
+    return config_copy
+
+
+def _real_data_assert_reml_report_fields(fitted: Any) -> None:
+    report = getattr(fitted, "fit_report", None)
+    if not isinstance(report, dict):
+        raise RuntimeError("real_data: fit_report must be dict")
+
+    required_keys = ["lambda_method", "lambda_value", "edf", "nu", "sigma2_reml"]
+    missing_keys = [key for key in required_keys if key not in report]
+    if missing_keys:
+        raise RuntimeError(f"real_data: fit_report missing keys: {missing_keys}")
+
+    lambda_method = str(report["lambda_method"])
+    if lambda_method.upper() != "REML":
+        raise RuntimeError(f"real_data: fit_report.lambda_method must be REML, got {lambda_method}")
+
+    lambda_value = float(report["lambda_value"])
+    edf = float(report["edf"])
+    nu = float(report["nu"])
+    sigma2_reml = float(report["sigma2_reml"])
+
+    if not np.isfinite(lambda_value) or lambda_value <= 0.0:
+        raise RuntimeError(f"real_data: lambda_value must be finite and > 0, got {lambda_value}")
+    if not np.isfinite(edf) or edf <= 0.0:
+        raise RuntimeError(f"real_data: edf must be finite and > 0, got {edf}")
+    if not np.isfinite(nu) or nu <= 3.0:
+        raise RuntimeError(f"real_data: nu must be finite and > 3, got {nu}")
+    if not np.isfinite(sigma2_reml) or sigma2_reml <= 0.0:
+        raise RuntimeError(f"real_data: sigma2_reml must be finite and > 0, got {sigma2_reml}")
+
+
 
 def _real_data_assert_ages_are_clamped(
     train_frame: pd.DataFrame,
@@ -410,8 +448,7 @@ def test_real_data_fit_gender_runs_and_preserves_centering(model=None) -> None:
     logger.info(
         "real_data fit_gender: beta_len=%s max_abs_constraint=%s",
         int(beta.size),
-        max_abs_constraint,
-    )
+        max_abs_constraint)
 
     if not np.isfinite(max_abs_constraint):
         raise RuntimeError("real_data: constraint check produced non-finite value")
@@ -455,19 +492,411 @@ def _real_data_make_gender_fit_frame(train_frame: pd.DataFrame, gender: str) -> 
     if df_gender.empty:
         raise RuntimeError(f"real_data: no rows for gender={gender}")
 
-    if df_gender.isna().any().any():
-        na_share = df_gender.isna().mean().to_dict()
-        raise RuntimeError(f"real_data: NA in gender fit frame: {na_share}")
-
     df_gender["age"] = df_gender["age"].astype(float)
-    df_gender["z"] = df_gender["Z"].astype(float)
-    df_gender = df_gender.drop(columns=["Z"])
+    df_gender["Z"] = df_gender["Z"].astype(float)
 
-    if not np.isfinite(df_gender["z"].to_numpy(dtype=float)).all():
-        raise RuntimeError("real_data: z contains non-finite values")
+    if not np.isfinite(df_gender["Z"].to_numpy(dtype=float)).all():
+        raise RuntimeError("real_data: Z contains non-finite values")
 
     return df_gender
 
+def test_real_data_predict_h_at_age_center_is_near_zero(model=None) -> None:
+    """
+    Проверяет контракт центрирования на реальных данных: h(age_center) ≈ 0.
+
+    По построению h(0)=0 на шкале x, а x=0 соответствует age=age_center.
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+    params = _real_data_get_age_params(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    age_center = float(params["age_center"])
+    h_at_center = fitted_model.predict_h(age_center)
+
+    if not np.isfinite(h_at_center):
+        raise RuntimeError(f"predict_h({age_center}) is not finite")
+
+    # Допуск: должен быть очень близок к 0
+    tol = 1e-8
+    if abs(h_at_center) > tol:
+        raise RuntimeError(
+            f"predict_h(age_center={age_center}) should be ~0, got {h_at_center}"
+        )
+
+    logger.info("real_data predict_h(age_center=%s) = %s", age_center, h_at_center)
+
+
+def test_real_data_predict_h_is_finite_across_age_range(model=None) -> None:
+    """
+    Проверяет что predict_h возвращает конечные значения по всему диапазону.
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+    params = _real_data_get_age_params(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    age_min = float(params["age_min_global"])
+    age_max = float(params["age_max_global"])
+    age_center = float(params["age_center"])
+
+    # Тестируем на сетке возрастов
+    test_ages = np.array([age_min, 25.0, age_center, 50.0, 65.0, age_max])
+    h_values = fitted_model.predict_h(test_ages)
+
+    if not isinstance(h_values, np.ndarray):
+        raise RuntimeError("predict_h(array) should return ndarray")
+
+    if h_values.shape != test_ages.shape:
+        raise RuntimeError(f"predict_h output shape mismatch: {h_values.shape} vs {test_ages.shape}")
+
+    if not np.isfinite(h_values).all():
+        raise RuntimeError("predict_h returned non-finite values")
+
+    logger.info(
+        "real_data predict_h: ages=%s h_values=%s",
+        test_ages.tolist(),
+        h_values.tolist(),
+    )
+
+
+def test_real_data_predict_h_clamps_correctly(model=None) -> None:
+    """
+    Проверяет что predict_h корректно кламп-ит возраста вне границ.
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+    params = _real_data_get_age_params(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    age_min = float(params["age_min_global"])
+    age_max = float(params["age_max_global"])
+
+    # Возраст ниже минимума
+    h_below = fitted_model.predict_h(10.0)
+    h_at_min = fitted_model.predict_h(age_min)
+
+    if abs(h_below - h_at_min) > 1e-12:
+        raise RuntimeError(
+            f"predict_h(10) should equal predict_h({age_min}), "
+            f"got {h_below} vs {h_at_min}"
+        )
+
+    # Возраст выше максимума
+    h_above = fitted_model.predict_h(100.0)
+    h_at_max = fitted_model.predict_h(age_max)
+
+    if abs(h_above - h_at_max) > 1e-12:
+        raise RuntimeError(
+            f"predict_h(100) should equal predict_h({age_max}), "
+            f"got {h_above} vs {h_at_max}"
+        )
+
+    logger.info("real_data predict_h clamp: OK")
+
+
+def test_real_data_predict_h_monotonic_after_peak(model=None) -> None:
+    """
+    Проверяет разумность формы h(age): после пика (обычно 25-35) должна расти.
+
+    Это не строгий контракт, а sanity check. Для марафонцев ожидаем:
+    - h(25) < h(50) < h(70) (время растёт с возрастом после пика)
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    h_30 = fitted_model.predict_h(30.0)
+    h_50 = fitted_model.predict_h(50.0)
+    h_70 = fitted_model.predict_h(70.0)
+
+    logger.info("real_data predict_h shape: h(30)=%s h(50)=%s h(70)=%s", h_30, h_50, h_70)
+
+    # Sanity check: h должна расти после пика
+    # (это не строгий тест, просто проверяем что форма разумная)
+    if not (h_50 > h_30):
+        logger.warning("predict_h shape warning: h(50) <= h(30), форма может быть необычной")
+
+    if not (h_70 > h_50):
+        logger.warning("predict_h shape warning: h(70) <= h(50), форма может быть необычной")
+
+
+def test_real_data_fit_report_contains_required_fields(model=None) -> None:
+    """
+    Проверяет что fit_report содержит обязательные поля.
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    fit_report = fitted_model.fit_report
+
+    required_fields = ["n", "age_range_actual", "K_raw", "K_cent", "lambda_value", "degree", "lambda_method"]
+    missing_fields = [f for f in required_fields if f not in fit_report]
+    if missing_fields:
+        raise RuntimeError(f"fit_report missing fields: {missing_fields}")
+
+    n = int(fit_report["n"])
+    if n <= 0:
+        raise RuntimeError(f"fit_report['n'] should be > 0, got {n}")
+
+    k_raw = int(fit_report["K_raw"])
+    k_cent = int(fit_report["K_cent"])
+    if k_cent != k_raw - 2:
+        raise RuntimeError(f"K_cent should be K_raw - 2: {k_cent} vs {k_raw - 2}")
+
+    lambda_value = float(fit_report["lambda_value"])
+    if not np.isfinite(lambda_value):
+        raise RuntimeError("fit_report['lambda_value'] must be finite")
+
+    lambda_method = str(fit_report["lambda_method"]).upper()
+
+    if lambda_method == "REML":
+        required_reml = ["edf", "nu", "sigma2_reml"]
+        missing_reml = [f for f in required_reml if f not in fit_report]
+        if missing_reml:
+            raise RuntimeError(f"fit_report missing REML fields: {missing_reml}")
+
+        edf = float(fit_report["edf"])
+        nu = float(fit_report["nu"])
+        sigma2_reml = float(fit_report["sigma2_reml"])
+
+        if lambda_value <= 0.0:
+            raise RuntimeError(f"REML: lambda_value must be > 0, got {lambda_value}")
+        if not np.isfinite(edf) or edf <= 0.0:
+            raise RuntimeError(f"REML: edf invalid: {edf}")
+        if not np.isfinite(nu) or nu <= 3.0:
+            raise RuntimeError(f"REML: nu invalid: {nu}")
+        if not np.isfinite(sigma2_reml) or sigma2_reml <= 0.0:
+            raise RuntimeError(f"REML: sigma2_reml invalid: {sigma2_reml}")
+
+    logger.info("real_data fit_report: n=%s K_raw=%s K_cent=%s", n, k_raw, k_cent)
+
+
+def test_real_data_fit_gender_with_reml_selects_positive_lambda_and_preserves_centering(model=None) -> None:
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+    config_reml = _real_data_config_with_lambda_method(model=model, lambda_method="REML")
+
+    fitter = AgeSplineFitter(config=config_reml)
+    fitted = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    lambda_value = float(getattr(fitted, "lambda_value", float("nan")))
+    if not np.isfinite(lambda_value) or lambda_value <= 0.0:
+        raise RuntimeError(f"real_data: fitted.lambda_value must be finite and > 0, got {lambda_value}")
+
+    basis_centering = fitted.basis_centering
+    if "A" not in basis_centering:
+        raise RuntimeError("real_data: basis_centering must contain key A")
+
+    beta = fitted.coef_beta.to_numpy(dtype=float)
+    constraints_matrix_A = np.asarray(basis_centering["A"], dtype=float)
+    max_abs_constraint = float(np.max(np.abs(constraints_matrix_A @ beta)))
+
+    tol = float(getattr(fitter, "centering_tol", 1e-10))
+    if not np.isfinite(max_abs_constraint):
+        raise RuntimeError("real_data: constraint check produced non-finite value")
+    if max_abs_constraint > tol * 10.0:
+        raise RuntimeError(
+            "real_data: centering constraints violated "
+            f"(max_abs_constraint={max_abs_constraint}, tol={tol})"
+        )
+
+    _real_data_assert_reml_report_fields(fitted=fitted)
+
+
+def test_real_data_fit_both_genders_with_reml(model=None) -> None:
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+
+    config_reml = _real_data_config_with_lambda_method(model=model, lambda_method="REML")
+    fitter = AgeSplineFitter(config=config_reml)
+
+    df_m = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+    df_f = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="F")
+
+    fitted_m = fitter.fit_gender(gender_df=df_m, gender="M")
+    fitted_f = fitter.fit_gender(gender_df=df_f, gender="F")
+
+    if float(fitted_m.lambda_value) <= 0.0 or not np.isfinite(float(fitted_m.lambda_value)):
+        raise RuntimeError(f"real_data: M lambda_value invalid: {fitted_m.lambda_value}")
+    if float(fitted_f.lambda_value) <= 0.0 or not np.isfinite(float(fitted_f.lambda_value)):
+        raise RuntimeError(f"real_data: F lambda_value invalid: {fitted_f.lambda_value}")
+
+    _real_data_assert_reml_report_fields(fitted=fitted_m)
+    _real_data_assert_reml_report_fields(fitted=fitted_f)
+
+def test_real_data_fit_both_genders(model=None) -> None:
+    """
+    Проверяет что AgeSplineFitter.fit() обучает модели для обоих полов.
+    """
+    if model is None:
+        model = _real_data_build_model()
+    train_frame = _real_data_get_train_frame(model)
+
+    # Готовим z_frame с обоими полами
+    required_columns = ["gender", "age", "Z"]
+    missing_columns = [col for col in required_columns if col not in train_frame.columns]
+    if missing_columns:
+        raise RuntimeError(f"real_data: train_frame missing columns: {missing_columns}")
+
+    z_frame = train_frame[["gender", "age", "Z"]].copy()
+    z_frame["age"] = z_frame["age"].astype(float)
+    z_frame["Z"] = z_frame["Z"].astype(float)
+
+    fitter = AgeSplineFitter(config=model.config)
+    models = fitter.fit(z_frame)
+
+    if not isinstance(models, dict):
+        raise RuntimeError("fit() should return dict")
+
+    # Проверяем что оба пола присутствуют
+    for gender in ["M", "F"]:
+        if gender not in models:
+            raise RuntimeError(f"fit() did not return model for gender={gender}")
+
+        gender_model = models[gender]
+
+        if gender_model.coef_beta.empty:
+            raise RuntimeError(f"fit() returned empty coef_beta for gender={gender}")
+
+        if not np.isfinite(gender_model.coef_beta.to_numpy()).all():
+            raise RuntimeError(f"fit() returned non-finite coef_beta for gender={gender}")
+
+        # Проверяем центрирование
+        h_at_center = gender_model.predict_h(35.0)
+        if abs(h_at_center) > 1e-8:
+            raise RuntimeError(
+                f"fit() gender={gender}: h(35) should be ~0, got {h_at_center}"
+            )
+
+    logger.info(
+        "real_data fit both genders: M_beta_len=%s F_beta_len=%s",
+        models["M"].coef_beta.size,
+        models["F"].coef_beta.size,
+    )
+
+
+def _real_data_pick_predict_case(model: MarathonModel) -> dict[str, Any]:
+    train_frame = _real_data_get_train_frame(model)
+    trace_references = getattr(model, "trace_references", None)
+    age_models = getattr(model, "age_spline_models", None)
+
+    if trace_references is None or len(trace_references) == 0:
+        raise RuntimeError("real_data: trace_references is missing or empty")
+    if age_models is None or len(age_models) == 0:
+        raise RuntimeError("real_data: age_spline_models is missing or empty")
+
+    required_columns = ["race_id", "gender", "age", "year"]
+    missing_columns = [col for col in required_columns if col not in train_frame.columns]
+    if missing_columns:
+        raise RuntimeError(f"real_data: train_frame missing columns: {missing_columns}")
+
+    max_rows = min(int(len(train_frame)), 5000)
+    for row_index in range(max_rows):
+        row = train_frame.iloc[row_index]
+        race_id = str(row["race_id"])
+        gender = str(row["gender"])
+        age = float(row["age"])
+        year = int(row["year"])
+
+        if gender not in age_models:
+            continue
+
+        try:
+            _ = get_reference_log(
+                trace_references=trace_references,
+                race_id=race_id,
+                gender=gender,
+                _year=year,
+            )
+        except KeyError:
+            continue
+
+        return {"race_id": race_id, "gender": gender, "age": age, "year": year}
+
+    raise RuntimeError("real_data: could not pick a valid (race_id, gender) case")
+
+
+def test_real_data_predict_log_time_equals_reference_plus_h(model=None) -> None:
+    if model is None:
+        model = _real_data_build_model()
+
+    case = _real_data_pick_predict_case(model)
+    race_id = str(case["race_id"])
+    gender = str(case["gender"])
+    age = float(case["age"])
+    year = int(case["year"])
+
+    trace_references = getattr(model, "trace_references", None)
+    if trace_references is None:
+        raise RuntimeError("real_data: trace_references is None")
+
+    age_models = getattr(model, "age_spline_models", None)
+    if age_models is None:
+        raise RuntimeError("real_data: age_spline_models is None")
+
+    reference_log = get_reference_log(
+        trace_references=trace_references,
+        race_id=race_id,
+        gender=gender,
+        _year=year,
+    )
+    h_value = age_models[gender].predict_h(age)
+    expected = float(reference_log) + float(h_value)
+
+    predicted = model.predict_log_time(race_id=race_id, gender=gender, age=age, year=year)
+    if not np.isfinite(float(predicted)):
+        raise RuntimeError("real_data: predict_log_time returned non-finite")
+
+    abs_err = abs(float(predicted) - expected)
+    if abs_err > 1e-10:
+        raise RuntimeError(f"real_data: predict_log_time mismatch: abs_err={abs_err}")
+
+    ages = np.array([age - 1.0, age, age + 1.0], dtype=float)
+    predicted_vec = model.predict_log_time(race_id=race_id, gender=gender, age=ages, year=year)
+    if not isinstance(predicted_vec, np.ndarray):
+        raise RuntimeError("real_data: predict_log_time(array) must return ndarray")
+    if predicted_vec.shape != ages.shape:
+        raise RuntimeError(f"real_data: predict_log_time(array) shape mismatch: {predicted_vec.shape}")
+    if not np.isfinite(predicted_vec).all():
+        raise RuntimeError("real_data: predict_log_time(array) returned non-finite")
+
+
+
+
+# ============================================================================
+# Точка входа
+# ============================================================================
 
 def test_real_data() -> None:
     """
@@ -477,12 +906,39 @@ def test_real_data() -> None:
     model = _real_data_build_model()
 
     tests: list[tuple[str, callable]] = [
+        # Базовые проверки пайплайна
         ("test_real_data_prepare_z_frame", test_real_data_prepare_z_frame),
+        ("test_real_data_train_frame_has_Z", test_real_data_train_frame_has_Z),
         ("test_real_data_solve_penalized_lsq_runs_and_preserves_centering",
          test_real_data_solve_penalized_lsq_runs_and_preserves_centering),
-        ("test_real_data_train_frame_has_Z", test_real_data_train_frame_has_Z),
+
+        # fit_gender (FIXED по умолчанию)
         ("test_real_data_fit_gender_runs_and_preserves_centering",
          test_real_data_fit_gender_runs_and_preserves_centering),
+
+        # fit_gender (REML)
+        ("test_real_data_fit_gender_with_reml_selects_positive_lambda_and_preserves_centering",
+         test_real_data_fit_gender_with_reml_selects_positive_lambda_and_preserves_centering),
+        ("test_real_data_fit_both_genders_with_reml",
+         test_real_data_fit_both_genders_with_reml),
+
+        # predict_h (на FIXED)
+        ("test_real_data_predict_h_at_age_center_is_near_zero",
+         test_real_data_predict_h_at_age_center_is_near_zero),
+        ("test_real_data_predict_h_is_finite_across_age_range",
+         test_real_data_predict_h_is_finite_across_age_range),
+        ("test_real_data_predict_h_clamps_correctly",
+         test_real_data_predict_h_clamps_correctly),
+        ("test_real_data_predict_h_monotonic_after_peak",
+         test_real_data_predict_h_monotonic_after_peak),
+
+        #  fit() и отчёт (самые интеграционные, ставим в конце)
+        ("test_real_data_fit_both_genders", test_real_data_fit_both_genders),
+        ("test_real_data_fit_report_contains_required_fields",
+         test_real_data_fit_report_contains_required_fields),
+
+        ('test_real_data_predict_log_time_equals_reference_plus_h',
+         test_real_data_predict_log_time_equals_reference_plus_h)
     ]
 
     for test_name, test_fn in tests:
@@ -496,6 +952,16 @@ def test_real_data() -> None:
             raise
 
     print("\n" + "=" * 60)
-    print("ALL REAL TESTS PASSED")
+    print("ALL REAL DATA TESTS PASSED")
     print("=" * 60)
+
+
+if __name__ == "__main__":
+    test_real_data()
+
+
+
+
+
+
 

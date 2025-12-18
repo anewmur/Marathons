@@ -18,6 +18,8 @@ import pandas as pd
 import numpy as np
 import logging
 
+from scipy.interpolate import BSpline
+
 logger = logging.getLogger(__name__)
 
 import math
@@ -143,68 +145,195 @@ class AgeSplineModel:
     
     # Отчет
     fit_report: dict[str, Any] = field(default_factory=dict)
-    
-    def predict_mean(self, age: float) -> float:
+
+    def predict_h(self, age: float | np.ndarray) -> float | np.ndarray:
+        """
+        Вычисляет сплайновую часть h(x) = B_raw(x) @ beta.
+
+        Args:
+            age: Возраст в годах (скаляр или массив).
+                 Clamp к [age_min_global, age_max_global] применяется автоматически.
+
+        Returns:
+            h: Значение сплайновой поправки на шкале Z.
+               Скаляр если вход скаляр, ndarray если вход массив.
+
+        Контракт:
+            - h(age_center) ≈ 0 (по центрированию h(0)=0)
+            - h'(age_center) ≈ 0 (по центрированию h'(0)=0)
+        """
+        # Проверка что модель обучена
+        if len(self.knots_x) == 0:
+            raise RuntimeError("predict_h: model not fitted (knots_x is empty)")
+        if self.coef_beta.empty:
+            raise RuntimeError("predict_h: model not fitted (coef_beta is empty)")
+
+        # Определяем был ли вход скаляром
+        is_scalar = np.isscalar(age)
+
+        # Конвертируем в массив для единообразной обработки
+        age_array = np.atleast_1d(np.asarray(age, dtype=float))
+
+        if not np.isfinite(age_array).all():
+            raise ValueError("predict_h: age contains non-finite values")
+
+        # Clamp возраста к глобальным границам
+        age_clamped = np.clip(
+            age_array,
+            a_min=float(self.age_min_global),
+            a_max=float(self.age_max_global),
+        )
+
+        # Нормировка: x = (age - age_center) / age_scale
+        x_std = (age_clamped - float(self.age_center)) / float(self.age_scale)
+
+        # Строим базис B_raw
+        knots_array = np.asarray(self.knots_x, dtype=float)
+        degree = int(self.degree)
+
+        # Clamp x_std к диапазону узлов (на случай экстраполяции)
+        x_left = float(knots_array[0])
+        x_right = float(knots_array[-1])
+        x_std_clamped = np.clip(x_std, a_min=x_left, a_max=x_right)
+
+        # Используем BSpline.design_matrix для эффективности
+        dm_sparse = BSpline.design_matrix(
+            x_std_clamped, knots_array, degree, extrapolate=False
+        )
+        b_raw = dm_sparse.toarray()
+
+        # Получаем коэффициенты как numpy array
+        beta = self.coef_beta.to_numpy(dtype=float)
+
+        # h = B_raw @ beta
+        h_values = b_raw @ beta
+
+        # Возвращаем скаляр если вход был скаляром
+        if is_scalar:
+            return float(h_values[0])
+        return h_values
+
+    def predict_mean(self, age: float | np.ndarray) -> float | np.ndarray:
         """
         Вычисляет m_g(a) = μ + γ*x + h(x).
-        
+
         Args:
-            age: Возраст в годах (может быть вне обучающего диапазона)
-        
+            age: Возраст в годах (скаляр или массив).
+                 Clamp к [age_min_global, age_max_global] применяется автоматически.
+
         Returns:
-            m: Предсказанное значение на нормированной шкале Z
-        
-        Raises:
-            NotImplementedError: Пока не реализовано (заглушка для Этапа 0)
-        
+            m: Предсказанное значение на нормированной шкале Z.
+               Скаляр если вход скаляр, ndarray если вход массив.
+
         Примечание:
-            Clamp НЕ применяется автоматически.
-            Если нужен clamp, он делается снаружи перед вызовом.
+            Сейчас coef_mu=0 и coef_gamma=0 (не реализованы),
+            поэтому predict_mean эквивалентен predict_h.
+            Когда добавим линейную часть, формула станет полной.
         """
-        raise NotImplementedError("predict_mean будет реализован в Этапе 10")
-    
+        # Определяем был ли вход скаляром
+        is_scalar = np.isscalar(age)
+
+        # Конвертируем в массив
+        age_array = np.atleast_1d(np.asarray(age, dtype=float))
+
+        if not np.isfinite(age_array).all():
+            raise ValueError("predict_mean: age contains non-finite values")
+
+        # Clamp возраста
+        age_clamped = np.clip(
+            age_array,
+            a_min=float(self.age_min_global),
+            a_max=float(self.age_max_global),
+        )
+
+        # x = (age - age_center) / age_scale
+        x_std = (age_clamped - float(self.age_center)) / float(self.age_scale)
+
+        # Сплайновая часть
+        h_values = self.predict_h(age_array)
+        if is_scalar:
+            h_values = np.atleast_1d(h_values)
+
+        # Полная модель: m = μ + γ*x + h(x)
+        mu = float(self.coef_mu)
+        gamma = float(self.coef_gamma)
+
+        m_values = mu + gamma * x_std + h_values
+
+        # Возвращаем скаляр если вход был скаляром
+        if is_scalar:
+            return float(m_values[0])
+        return m_values
+
     def design_row(self, age: float) -> dict[str, float]:
         """
-        Возвращает столбцы центрированного дизайна для заданного возраста.
-        
+        Возвращает столбцы центрированной марицы  для заданного возраста.
+
         Args:
             age: Возраст в годах
-        
+
         Returns:
             Словарь с ключами:
             - "intercept": 1.0
             - "x": нормированный возраст
-            - "spline_0", "spline_1", ...: значения центрированных базисных функций
-        
-        Raises:
-            NotImplementedError: Пока не реализовано (заглушка для Этапа 0)
-        
+            - "spline_0", "spline_1", ...: значения базисных функций B_raw
+
         Примечание:
             Используется для диагностики и тестирования.
             Ключи spline_* соответствуют индексу coef_beta.
         """
-        raise NotImplementedError("design_row будет реализован в Этапе 10")
+        if len(self.knots_x) == 0:
+            raise RuntimeError("design_row: model not fitted (knots_x is empty)")
+
+        # Clamp и нормировка
+        age_clamped = float(np.clip(
+            age,
+            a_min=float(self.age_min_global),
+            a_max=float(self.age_max_global),
+        ))
+        x_std = (age_clamped - float(self.age_center)) / float(self.age_scale)
+
+        # Базис
+        knots_array = np.asarray(self.knots_x, dtype=float)
+        x_left = float(knots_array[0])
+        x_right = float(knots_array[-1])
+        x_std_clamped = float(np.clip(x_std, a_min=x_left, a_max=x_right))
+
+        dm_sparse = BSpline.design_matrix(
+            np.array([x_std_clamped]), knots_array, int(self.degree), extrapolate=False
+        )
+        b_row = dm_sparse.toarray()[0]
+
+        result: dict[str, float] = {
+            "intercept": 1.0,
+            "x": x_std,
+        }
+
+        for j, val in enumerate(b_row):
+            result[f"spline_{j}"] = float(val)
+
+        return result
 
 
 def save_age_spline_models(
-    models: dict[str, AgeSplineModel],
-    output_path: str | Path,
-    metadata: dict | None = None
+        models: dict[str, AgeSplineModel],
+        output_path: str | Path,
+        metadata: dict | None = None
 ) -> Path:
     """
     Сохранение словаря моделей в .pkl файл.
-    
+
     Args:
         models: Словарь {"M": model_m, "F": model_f}
         output_path: Путь к .pkl файлу
         metadata: Дополнительные данные (дата обучения, версия кода, и т.д.)
-    
+
     Returns:
         Path к созданному файлу
-    
+
     Raises:
         NotImplementedError: Пока не реализовано (заглушка для Этапа 0)
-    
+
     Примечание:
         Сохраняет:
         - models (dict с AgeSplineModel)
@@ -216,17 +345,23 @@ def save_age_spline_models(
 def load_age_spline_models(input_path: str | Path) -> dict[str, AgeSplineModel]:
     """
     Загрузка моделей из .pkl файла.
-    
+
     Args:
         input_path: Путь к .pkl файлу
-    
+
     Returns:
         Словарь {"M": model_m, "F": model_f}
-    
+
     Raises:
         NotImplementedError: Пока не реализовано (заглушка для Этапа 0)
-    
+
     Примечание:
         Загружает models и выводит информацию из metadata в лог.
     """
     raise NotImplementedError("load_age_spline_models будет реализован в Этапе 12")
+
+
+
+
+
+
