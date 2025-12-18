@@ -154,8 +154,6 @@ class CityNormalizer:
         if not lowered:
             return None
 
-        # if lowered == 'минская обл':
-        #     print('!')
 
         if lowered in CITY_CANONICAL_MAP:
             return CITY_CANONICAL_MAP[lowered]

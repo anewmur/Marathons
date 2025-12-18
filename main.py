@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
@@ -13,16 +12,20 @@ import numpy as np
 import yaml
 import time
 
+from spline_model.z_frame import build_z_frame
 from utils.raw_filter import RawFilter
 import DataLoader.data_loader as data_loader_module
 from DataLoader.data_loader import DataLoader
 
 from Preprocessor.preprocessor import Preprocessor
-from trace_reference_builder import TraceReferenceBuilder, save_trace_references_xlsx
+from trace_reference_builder import TraceReferenceBuilder, save_trace_references_xlsx, get_reference_log
 from age_reference_builder import AgeReferenceBuilder, save_age_references_xlsx, format_seconds_to_hhmmss
 
-logger = logging.getLogger(__name__)
+from spline_model.age_spline_fit import AgeSplineFitter
+from spline_model.age_spline_model import AgeSplineModel
 
+logger = logging.getLogger(__name__)
+from logging_setup import easy_logging
 
 def log_frame_stats(frame_name: str, data: pd.DataFrame) -> None:
     """
@@ -69,14 +72,15 @@ class MarathonModel:
     df_clean: pd.DataFrame | None             # предобработанные данные с row_id
     trace_references: pd.DataFrame | None
     age_references: dict[str, pd.DataFrame]
+    age_spline_models: dict[str, AgeSplineModel] | None
 
     _data_loader: DataLoader
+    _age_spline_fitter: AgeSplineFitter | None
     _steps_completed: dict[str, bool]
 
     def __init__(
         self,
         data_path: str | Path,
-        validation_year: int | None = None,
         verbose: bool = True,
     ) -> None:
         """
@@ -89,11 +93,9 @@ class MarathonModel:
         self.verbose = verbose
         self.config = self._load_config()
         self.dumping_info = self.config.get("dumping_info", {})
+        self.output_path = self.config.get("path_for_outputs")
 
-        if validation_year is None:
-            self.validation_year = int(self.config.get("validation", {}).get("year", 0))
-        else:
-            self.validation_year = int(validation_year)
+        self.validation_year = int(self.config.get("validation_year")["year"])
 
         self._data_loader = DataLoader()
         logger.info("DataLoader class: %s.%s", self._data_loader.__class__.__module__,
@@ -103,6 +105,9 @@ class MarathonModel:
 
         self.df = None
         self.df_clean = None
+        self.train_frame_loy: pd.DataFrame | None = None
+        self.age_spline_train_frame: pd.DataFrame | None = None
+
         self.trace_references = None
         self.age_references = {}
 
@@ -112,6 +117,7 @@ class MarathonModel:
             "validate_raw": False,
             "add_row_id": False,
             "preprocess": False,
+            "build_train_frame_loy": False,
             "build_trace_references": False,
             "build_age_references": False,
             "fit_age_model": False,
@@ -132,7 +138,7 @@ class MarathonModel:
             logger.warning("config.yaml не найден, используются значения по умолчанию")
             return {
                 "preprocessing": {"age_center": 35, "age_scale": 10},
-                "validation": {"year": 0},
+                "validation_year": {"year": 0},
             }
         with open(config_path, "r", encoding="utf-8") as file_handle:
             return yaml.safe_load(file_handle)
@@ -154,16 +160,6 @@ class MarathonModel:
                     f"Сначала вызовите model.{step_name}()"
                 )
 
-    def _get_loy_frame(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        """
-        Возвращает LOY-выборку (исключает validation_year).
-        Input: датафрейм.
-        Returns: копия датафрейма без строк validation_year (если задан).
-        Does: фильтрует по году валидации.
-        """
-        if self.validation_year > 0:
-            return dataframe[dataframe["year"] != self.validation_year].copy()
-        return dataframe.copy()
 
     def _log_step(
         self,
@@ -460,6 +456,28 @@ class MarathonModel:
         )
 
         return self
+
+    def build_train_frame_loy(self) -> "MarathonModel":
+        """
+        Готовит и сохраняет LOY train_frame для всех последующих обучающих шагов.
+        """
+        self._check_step("build_train_frame_loy", ["preprocess"])
+        start_time = time.time()
+        rows_in = len(self.df_clean)
+
+        self.train_frame_loy = self._build_train_frame_for_loy()
+        rows_out = len(self.train_frame_loy)
+
+        self._steps_completed["build_train_frame_loy"] = True
+        self._log_step(
+            "build_train_frame_loy",
+            rows_in=rows_in,
+            rows_out=rows_out,
+            elapsed_sec=(time.time() - start_time),
+            extra=f"validation_year={self.validation_year}",
+        )
+        return self
+
     # ------------------------------------------------------------------
     # step 5: trace references
     # ------------------------------------------------------------------
@@ -477,9 +495,14 @@ class MarathonModel:
         start_time = time.time()
         rows_in = len(self.df_clean)
 
-        loy_frame = self._get_loy_frame(self.df_clean)
+        self._check_step("build_trace_references", ["build_train_frame_loy"])
+        assert self.train_frame_loy is not None
+
+        start_time = time.time()
+        rows_in = len(self.train_frame_loy)
+
         builder = TraceReferenceBuilder(self.config)
-        self.trace_references = builder.build(loy_frame)
+        self.trace_references = builder.build(self.train_frame_loy)
 
         if self.trace_references is None or self.trace_references.empty:
             raise ValueError("Не удалось построить эталоны трасс")
@@ -503,7 +526,46 @@ class MarathonModel:
             format_seconds_to_hhmmss(self.trace_references["reference_time"]))
 
         if self.dumping_info:
-            save_trace_references_xlsx(self.trace_references, "outputs/trace_references.xlsx")
+            output_path_file = Path( self.output_path, 'trace_references.xlsx')
+            save_trace_references_xlsx(self.trace_references, output_path = output_path_file)
+
+        return self
+
+    def add_z_to_train_frame_loy(self) -> "MarathonModel":
+        """
+        Добавляет колонку Z в train_frame_loy по контракту:
+        Z = Y - ln R^{use}_{c,g}
+        """
+        train_frame = getattr(self, "train_frame_loy", None)
+        if train_frame is None or train_frame.empty:
+            raise RuntimeError("train_frame_loy is missing or empty")
+
+        trace_references = getattr(self, "trace_references", None)
+        if trace_references is None or len(trace_references) == 0:
+            raise RuntimeError("trace_references is missing or empty")
+
+        required_columns = ["race_id", "gender", "Y"]
+        missing_columns = [col for col in required_columns if col not in train_frame.columns]
+        if missing_columns:
+            raise RuntimeError(f"train_frame_loy missing columns: {missing_columns}")
+
+        z_values: list[float] = []
+        for _, row in train_frame.iterrows():
+            race_id = str(row["race_id"])
+            gender = str(row["gender"])
+            y_value = float(row["Y"])
+
+            reference_log = get_reference_log(
+                trace_references=trace_references,
+                race_id=race_id,
+                gender=gender,
+                _year=None,
+            )
+            z_values.append(y_value - float(reference_log))
+
+        train_frame = train_frame.copy()
+        train_frame["Z"] = np.asarray(z_values, dtype=float)
+        self.train_frame_loy = train_frame
 
         return self
 
@@ -521,14 +583,16 @@ class MarathonModel:
         assert self.df_clean is not None
 
         start_time = time.time()
-        rows_in = len(self.df_clean)
 
-        loy_frame = self._get_loy_frame(self.df_clean)
+        self._check_step("build_age_references", ["build_train_frame_loy"])
+        assert self.train_frame_loy is not None
+
+        rows_in = len(self.train_frame_loy)
         builder = AgeReferenceBuilder(self.config)
 
         references_by_race: dict[str, pd.DataFrame] = {}
 
-        for race_id_value, race_group in loy_frame.groupby("race_id", sort=False):
+        for race_id_value, race_group in self.train_frame_loy.groupby("race_id", sort=False):
             table = builder.build(race_group)
             if table is None or table.empty:
                 group_sizes = (
@@ -579,7 +643,8 @@ class MarathonModel:
         self.age_references = references_by_race
 
         if self.dumping_info:
-            save_age_references_xlsx(self.age_references, "outputs/age_references.xlsx")
+            output_path_file = Path(self.output_path, 'age_references.xlsx')
+            save_age_references_xlsx(self.age_references, output_path=output_path_file)
 
         self._steps_completed["build_age_references"] = True
         self._log_step(
@@ -595,54 +660,60 @@ class MarathonModel:
     # step 7: fit age model
     # ------------------------------------------------------------------
 
-    def fit_age_model(self) -> "MarathonModel":
+    def _build_train_frame_for_loy(self) -> pd.DataFrame:
         """
-        Обучает возрастную модель (пока заглушка).
-        Делает: формирует train_frame (LOY) и фиксирует шаг как выполненный.
+        Строит обучающий фрейм LOY из df_clean.
+        Источник истины по году: self.validation_year.
         """
-        self._check_step("fit_age_model", ["preprocess", "build_trace_references"])
+        if self.df_clean is None:
+            raise RuntimeError("_build_train_frame_for_loy: df_clean is None")
 
-        start_time = time.time()
-        rows_in = len(self.df_clean)
-
-        start_frame = self.df_clean.copy()
-        train_frame = start_frame
+        train_frame = self.df_clean.copy()
 
         if "status" in train_frame.columns:
             train_frame = train_frame[train_frame["status"] == "OK"].copy()
 
-        validation_year = int(self.config.get("validation", {}).get("year", 0))
-        rows_before_year_drop = len(train_frame)
-        if validation_year > 0 and "year" in train_frame.columns:
-            train_frame = train_frame[train_frame["year"] != validation_year].copy()
+        if self.validation_year > 0 and "year" in train_frame.columns:
+            train_frame = train_frame[train_frame["year"] != self.validation_year].copy()
 
         required_columns = ["race_id", "gender", "age", "time_seconds", "Y", "x"]
         missing_columns = [col for col in required_columns if col not in train_frame.columns]
         if missing_columns:
-            raise ValueError(f"fit_age_model: missing columns: {missing_columns}")
+            raise ValueError(f"_build_train_frame_for_loy: missing columns: {missing_columns}")
+
+        train_frame = train_frame.dropna(subset=required_columns).copy()
+        return train_frame
+
+
+    def fit_age_model(self) -> "MarathonModel":
+        """
+            - берёт train_frame_loy (уже OK и без validation_year)
+            - строит Z = Y - ln R^{use}
+            - обучает возрастные модели по полу
+            - сохраняет self.age_spline_models
+            """
+        self._check_step("fit_age_model", ["build_trace_references", "build_train_frame_loy"])
+        assert self.df_clean is not None
+        assert self.train_frame_loy is not None
+
+        start_time = time.time()
+        rows_in = len(self.df_clean)
+
+        train_frame = self.train_frame_loy.copy()
+        z_frame = build_z_frame(train_frame=train_frame, trace_references=self.trace_references)
+
+        fitter = AgeSplineFitter(config=self.config)
+        self.age_spline_models = fitter.fit(z_frame)
 
         rows_out = len(train_frame)
-        train_frame = train_frame.dropna(subset=required_columns).copy()
-        # после фильтра по году:
-        dropped_by_year = rows_before_year_drop - len(train_frame)
-        rows_before_na_drop = len(train_frame)
-        # после dropna:
-        dropped_by_na = rows_before_na_drop - len(train_frame)
+        elapsed = time.time() - start_time
 
-        extra_parts: list[str] = []
-        extra_parts.append(f"validation_year={validation_year}")
-        extra_parts.append(f"dropped_by_year={dropped_by_year}")
-        extra_parts.append(f"dropped_by_na={dropped_by_na}")
-
-        extra = ", ".join(extra_parts)
-
-        self._steps_completed["fit_age_model"] = True
         self._log_step(
             "fit_age_model",
             rows_in=rows_in,
             rows_out=rows_out,
-            elapsed_sec=(time.time() - start_time),
-            extra=extra,
+            elapsed_sec=elapsed,
+            extra=f"validation_year={self.validation_year}",
         )
         return self
 
@@ -662,7 +733,9 @@ class MarathonModel:
             .validate_raw()
             .add_row_id()
             .preprocess()
+            .build_train_frame_loy()
             .build_trace_references()
+            .add_z_to_train_frame_loy()
             .build_age_references()
             .fit_age_model()
         )
@@ -716,12 +789,11 @@ class MarathonModel:
 
 
 if __name__ == "__main__":
-    from logging_setup import easy_logging
+
     easy_logging(True)
 
     model = MarathonModel(
         data_path=r"C:\Users\andre\github\Marathons\Data",
-        validation_year=2025,
         verbose=True
     )
     model.run()

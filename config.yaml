@@ -7,7 +7,6 @@ preprocessing:
   suspicious_report: true
   debug_timing_top: 15
   write_person_clusters_json: true
-  person_clusters_json_path: "artifacts/person_clusters.json"
 
 
 references:
@@ -23,9 +22,6 @@ age_references:
   bootstrap_samples: 500  # Число bootstrap-выборок для оценки дисперсии
   random_seed: 456        # Seed для воспроизводимости
 
-validation:
-  year: 2025          # Год для валидации (исключается из обучения)
-
 raw_filter:
   only_finishers: true          # True -> оставить только OK
   allowed_statuses: null         # например ["OK"] или ["OK","DNF"] (если нужно)
@@ -36,4 +32,20 @@ raw_filter:
   race_ids: null                 # ["Белые ночи", ...] или null
   years: null                   # [2016,2017,...] или null
 
-dumping_info: true
+age_spline_model:
+  # B-сплайн параметры
+  degree: 3                    # Кубический сплайн
+  max_inner_knots: 10          # Максимум внутренних узлов
+  min_knot_gap: 0.2            # Минимальный разрыв в x-шкале (= 2 года в age)
+
+  # Глобальные границы возраста (для clamp при обучении)
+  age_min_global: 18
+  age_max_global: 80
+
+dumping_info: false
+
+path_for_outputs: 'C:\Users\andre\github\Marathons\test_outputs'
+
+
+validation_year:
+  year: 2025          # Год для валидации

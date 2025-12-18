@@ -23,6 +23,45 @@ logger = logging.getLogger(__name__)
 from pathlib import Path
 
 
+def get_reference_log(
+        trace_references: pd.DataFrame,
+        race_id: str,
+        gender: str,
+        _year: int | None = None,
+) -> float:
+    """
+    Получить ln R^{use}_{c,g} для пары (race_id, gender).
+
+    КОНТРАКТ ГОДОВОЙ ЗАВИСИМОСТИ:
+    R^{use}_{c,g} НЕ зависит от года в текущей реализации.
+    Для доступа к эталону нужно использовать функцию get_reference_log(), а не прямой доступ к DataFrame.
+
+    Параметр _year принимается для:
+    - Совместимости API с будущими годовыми поправками
+    - Явного указания, что вызывающий код "знает" про год
+
+    Когда потребуется годовая зависимость, изменения вносятся ЗДЕСЬ.
+
+    Args:
+        trace_references: DataFrame от TraceReferenceBuilder.build()
+        race_id: Идентификатор трассы
+        gender: "M" или "F"
+        _year: Год (игнорируется в текущей версии)
+
+    Returns:
+        ln R^{use}_{c,g}
+
+    Raises:
+        KeyError: Если пара (race_id, gender) не найдена
+    """
+    mask = (trace_references["race_id"] == race_id) & (trace_references["gender"] == gender)
+    values = trace_references.loc[mask, "reference_log"].values
+
+    if values.size == 0:
+        raise KeyError(f"Reference not found for ({race_id}, {gender})")
+
+    return float(values[0])
+
 def save_trace_references_xlsx(
     references_df: pd.DataFrame,
     output_path: str | Path) -> Path:
@@ -139,6 +178,9 @@ class TraceReferenceBuilder:
                 - reference_std (bootstrap std эталона)
                 - n_total (размер группы)
                 - n_used (использовано после top/trim)
+
+        КОНТРАКТ: результат отсортирован по (gender, age) и имеет reset_index.
+            Это гарантируется этим методом, не полагайтесь на внешнюю сортировку.
         """
         self._validate_dataframe(dataframe)
 
@@ -163,6 +205,10 @@ class TraceReferenceBuilder:
             return self._empty_result()
 
         result = pd.DataFrame(rows)
+
+        # КОНТРАКТ: результат отсортирован по (race_id, gender)
+        result = result.sort_values(["race_id", "gender"]).reset_index(drop=True)
+
         logger.info(f"ReferenceBuilder: построено {len(result)} эталонов")
 
         return result

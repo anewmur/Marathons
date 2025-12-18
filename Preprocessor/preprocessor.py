@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from pathlib import Path
+
 from utils.city_normalizer import CityNormalizer, dump_unrecognized_cities
 import logging
 import time
@@ -515,7 +518,7 @@ def drop_ambiguous_event_multi(df: pd.DataFrame) -> pd.DataFrame:
         debug_df = df.loc[leftover_event_multi_mask, [
             "runner_id", "race_id", "year", "bib_number", "city", "age", "time_seconds",
         ]]
-        logger.warning(
+        logger.info(
             "drop_ambiguous_event_multi: leftover event_multi rows=%d\n%s",
             removed_leftover,
             debug_df.sort_values(["runner_id", "race_id", "year"]).head(50).to_string(index=True),
@@ -537,7 +540,7 @@ def drop_ambiguous_event_multi(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df_out
 
-def normalize_city_names(df: pd.DataFrame, dumping_info) -> pd.DataFrame:
+def normalize_city_names(df: pd.DataFrame, dumping_info, output_path='outputs') -> pd.DataFrame:
     """
     Нормализует значения city с помощью CityNormalizer.
     Не заполняет пропуски, не использует runner_id.
@@ -588,27 +591,37 @@ def normalize_city_names(df: pd.DataFrame, dumping_info) -> pd.DataFrame:
         dump_unrecognized_cities(
             df_out,
             limit=200,
-            output_path="outputs/unrecognized_cities_top.txt",
+            output_path=Path(output_path, "unrecognized_cities_top.txt"),
         )
 
     return df_out
 
-def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd.DataFrame:
+def add_features(
+    df: pd.DataFrame,
+    *,
+    age_center: float,
+    age_scale: float,
+    age_min_global: float,
+    age_max_global: float,
+) -> pd.DataFrame:
     """
-    Добавляет модельные признаки.
+    Добавляет модельные признаки и фиксирует домен возраста для сплайна.
+
+    Делает:
+    - age_clamped = clip(age, [age_min_global, age_max_global])
+    - Y = ln(time_seconds)
+    - x = (age_clamped - age_center) / age_scale
 
     Вход:
-    - time_seconds: время финиша в секундах (строго > 0)
-    - age: возраст (не NA)
-    - параметры нормировки возраста: age_center, age_scale
+    - time_seconds: строго > 0
+    - age: не NA
+    - age_center, age_scale: параметры нормировки
+    - age_min_global, age_max_global: глобальные границы возраста из конфига
 
     Выход:
-    - Y: log-время, Y = ln(time_seconds)
-    - x: нормированный возраст, x = (age - age_center) / age_scale
-
-    Инварианты:
-    - Y конечен
-    - x конечен
+    - age: перезаписан на age_clamped (float)
+    - Y: float
+    - x: float
     """
     start_time = time.time()
     rows_in = len(df)
@@ -618,8 +631,12 @@ def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd
     if "age" not in df.columns:
         raise ValueError("Missing column: age")
 
-    if age_scale == 0:
+    if not (age_scale != 0.0):
         raise ValueError("age_scale must be non-zero")
+    if not (age_max_global > age_min_global):
+        raise ValueError(
+            f"age_max_global must be > age_min_global, got {age_min_global}, {age_max_global}"
+        )
 
     df_out = df.copy()
 
@@ -637,8 +654,11 @@ def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd
     if invalid_age_count > 0:
         raise ValueError(f"Invalid age (NA): {invalid_age_count} rows")
 
+    age_clamped = age_years.clip(lower=float(age_min_global), upper=float(age_max_global)).astype(float)
+
+    df_out["age"] = age_clamped
     df_out["Y"] = time_seconds.map(math.log).astype(float)
-    df_out["x"] = ((age_years - float(age_center)) / float(age_scale)).astype(float)
+    df_out["x"] = ((age_clamped - float(age_center)) / float(age_scale)).astype(float)
 
     nonfinite_y = int((~pd.Series(df_out["Y"]).map(math.isfinite)).sum())
     nonfinite_x = int((~pd.Series(df_out["x"]).map(math.isfinite)).sum())
@@ -656,6 +676,8 @@ def add_features(df: pd.DataFrame, *, age_center: float, age_scale: float) -> pd
         {
             "age_center": age_center,
             "age_scale": age_scale,
+            "age_min_global": age_min_global,
+            "age_max_global": age_max_global,
         },
     )
 
@@ -969,7 +991,7 @@ def apply_majority_gender(df: pd.DataFrame, majority_map: pd.DataFrame) -> tuple
     return kept, removed_rows, removed_runner_ids, changed_rows
 
 
-def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False) -> pd.DataFrame:
+def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False, output_path='outputs') -> pd.DataFrame:
     """
     Делает пол внутри runner_id однозначным по большинству.
 
@@ -1054,7 +1076,7 @@ def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False) -> pd.DataFrame
     removed_report = report_df[report_df["winner"].isna() & (report_df["total"] > 0)].copy()
 
     if dumping_info:
-        report_path = "outputs/gender_fixes.txt"
+        report_path = Path(output_path, 'gender_fixes.txt')
         with open(report_path, "w", encoding="utf-8") as file_handle:
             file_handle.write("ИЗМЕНЕННО (БЫЛИ ЗНАЧЕНИЯ M и Ж. ЕСТЬ БОЛЬШИНСТВО)\n")
             file_handle.write(changed_report.to_string(index=False))
@@ -1066,12 +1088,12 @@ def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False) -> pd.DataFrame
         logger.info("fix_gender_by_majority report saved: %s", report_path)
 
     if len(changed_report) > 0:
-        logger.warning(
+        logger.info(
             "fix_gender_by_majority changed winners (top 30):\n%s",
             changed_report.head(30).to_string(index=False),
         )
     if len(removed_report) > 0:
-        logger.warning(
+        logger.info(
             "fix_gender_by_majority removed ambiguous (top 30):\n%s",
             removed_report.head(30).to_string(index=False),
         )
@@ -1099,10 +1121,13 @@ def fix_gender_by_majority(df: pd.DataFrame, dumping_info=False) -> pd.DataFrame
 
 class Preprocessor:
     def __init__(self, config: dict[str, Any]) -> None:
-        preprocessing_config = config.get("preprocessing", {})
+        self.output_path = config.get("path_for_outputs")
         self.dumping_info = config.get("dumping_info", {})
-        self.age_center = float(preprocessing_config.get("age_center", 35.0))
-        self.age_scale = float(preprocessing_config.get("age_scale", 10.0))
+        self.age_center =  float(config["preprocessing"]["age_center"])
+        self.age_scale = float(config["preprocessing"]["age_scale"])
+
+        self.age_min_global = float(config["age_spline_model"]["age_min_global"])
+        self.age_max_global = float(config["age_spline_model"]["age_max_global"])
 
     def run(self, df: pd.DataFrame) -> pd.DataFrame:
         start_time = time.time()
@@ -1117,13 +1142,17 @@ class Preprocessor:
             .pipe(compute_approx_birth_year)
             .pipe(stabilize_birth_year)
             .pipe(assign_runner_id)
-            .pipe(normalize_city_names, dumping_info=self.dumping_info)
+            .pipe(normalize_city_names, dumping_info=self.dumping_info, output_path=self.output_path)
             .pipe(fill_city_within_runner)
             .pipe(split_runner_id_by_city_when_conflicted)
-            .pipe(fix_gender_by_majority, dumping_info=self.dumping_info)
+            .pipe(fix_gender_by_majority, dumping_info=self.dumping_info, output_path=self.output_path)
             .pipe(deduplicate_strict)
             .pipe(drop_ambiguous_event_multi)
-            .pipe(add_features, age_center=self.age_center, age_scale=self.age_scale)
+            .pipe(add_features,
+                    age_center=self.age_center,
+                    age_scale=self.age_scale,
+                    age_min_global=self.age_min_global,
+                    age_max_global=self.age_max_global,)
         )
 
         _log_step("preprocess_total", rows_in, len(result), start_time)
