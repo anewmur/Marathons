@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from main import MarathonModel
+from MarathonAgeModel import MarathonModel
 
 
 class _DummyAgeModel:

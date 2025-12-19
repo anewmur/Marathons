@@ -58,6 +58,9 @@ def format_seconds_to_hhmmss(seconds_series: pd.Series) -> pd.Series:
     return hours_str + ":" + minutes_str + ":" + seconds_str
 
 
+def to_hhmmss(seconds_value: float) -> str:
+    series = pd.Series([seconds_value])
+    return format_seconds_to_hhmmss(series).iloc[0]
 
 def save_age_references_xlsx(
     references_by_race: dict[str, pd.DataFrame],

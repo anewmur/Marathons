@@ -6,13 +6,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from main import MarathonModel, easy_logging
+from MarathonAgeModel import MarathonModel, easy_logging
 from spline_model.age_spline_fit import build_knots_x, AgeSplineFitter
 from spline_model.age_spline_fit import build_raw_basis
 from spline_model.build_centering_matrix import build_centering_matrix
 from spline_model.age_spline_fit import build_second_difference_matrix
 from spline_model.age_spline_fit import solve_penalized_lsq
 from trace_reference_builder import get_reference_log
+
 logger = logging.getLogger(__name__)
 
 def test_real_data_prepare_z_frame(model=None) -> None:
@@ -80,6 +81,7 @@ def _real_data_build_model() -> MarathonModel:
     Возвращает модель после run(), чтобы были заполнены train_frame LOY и нужные артефакты.
     """
     easy_logging(True)
+    logger.info('Строим модель!')
     model = MarathonModel(
         data_path=r"C:\Users\andre\github\Marathons\Data",
         verbose=True,
@@ -1017,6 +1019,199 @@ def test_real_data_tau2_bar_with_missing_references(model=None) -> None:
         )
 
     logger.info("real_data tau2_bar with missing references: OK (tau2_bar=0.0)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ИНТЕГРАЦИОННЫЕ ТЕСТЫ НА РЕАЛЬНЫХ ДАННЫХ
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_predict_with_uncertainty_real_data_scalar(model=None) -> None:
+    """
+    Интеграционный тест: скалярный прогноз на реальных данных.
+
+    Проверяет полный pipeline с реальной моделью.
+    """
+
+    if model is None:
+        model = _real_data_build_model()
+
+    # ═══════════════════════════════════════════════════════════
+    # Делаем прогноз для реальной трассы
+    # ═══════════════════════════════════════════════════════════
+
+    # Берём первую доступную трассу и пол из trace_references
+    first_ref = model.trace_references.iloc[0]
+    race_id = first_ref["race_id"]
+    gender = first_ref["gender"]
+
+    result = model.predict_with_uncertainty(
+        race_id=race_id,
+        gender=gender,
+        age=40.0,
+        year=2025,
+        confidence=0.95,
+        method="analytical"
+    )
+
+    # ═══════════════════════════════════════════════════════════
+    # Проверки
+    # ═══════════════════════════════════════════════════════════
+
+    # 1. Все значения конечны
+    for key in ['time_pred', 'time_lower', 'time_upper', 'sigma']:
+        if not np.isfinite(result[key]):
+            raise RuntimeError(f"Real data: {key} is not finite: {result[key]}")
+
+    # 2. Порядок интервала
+    if not (result['time_lower'] < result['time_pred'] < result['time_upper']):
+        raise RuntimeError(
+            f"Real data: Interval order violated: "
+            f"{result['time_lower']} < {result['time_pred']} < {result['time_upper']}"
+        )
+
+    # 3. Разумные значения (time должно быть в разумных пределах для марафона)
+    # Например, 2-6 часов = 120-360 минут
+    if not (120.0 < result['time_pred'] < 360.0):
+        print(f"Warning: time_pred={result['time_pred']:.1f} is outside reasonable range")
+
+    # 4. Интервал не должен быть слишком широким (например, не более 2х от pred)
+    width = result['time_upper'] - result['time_lower']
+    if width > 2.0 * result['time_pred']:
+        print(f"Warning: interval width={width:.1f} is very large")
+
+    print(f"✓ Real data prediction for race={race_id}, gender={gender}")
+    print(f"✓ time_pred: {result['time_pred']:.2f} min")
+    print(f"✓ 95% CI: [{result['time_lower']:.2f}, {result['time_upper']:.2f}] min")
+    print(f"✓ sigma: {result['sigma']:.4f}")
+
+
+def test_predict_with_uncertainty_real_data_array(model=None) -> None:
+    """
+    Интеграционный тест: массив возрастов на реальных данных.
+
+    Проверяет что можно получить кривую прогноза по возрастам.
+    """
+
+
+    if model is None:
+        model = _real_data_build_model()
+
+    # ═══════════════════════════════════════════════════════════
+    # Делаем прогноз для диапазона возрастов
+    # ═══════════════════════════════════════════════════════════
+
+    first_ref = model.trace_references.iloc[0]
+    race_id = first_ref["race_id"]
+    gender = first_ref["gender"]
+
+    ages = np.array([20.0, 30.0, 40.0, 50.0, 60.0, 70.0])
+
+    result = model.predict_with_uncertainty(
+        race_id=race_id,
+        gender=gender,
+        age=ages,
+        year=2025,
+        confidence=0.95,
+        method="analytical"
+    )
+
+    # ═══════════════════════════════════════════════════════════
+    # Проверки
+    # ═══════════════════════════════════════════════════════════
+
+    # 1. Размерность
+    if result['time_pred'].shape != ages.shape:
+        raise RuntimeError(
+            f"Real data: Shape mismatch: {result['time_pred'].shape} != {ages.shape}"
+        )
+
+    # 2. Все значения конечны
+    if not np.isfinite(result['time_pred']).all():
+        raise RuntimeError("Real data: time_pred contains non-finite values")
+
+    # 3. Монотонность после пика (время должно расти с возрастом после ~25-30 лет)
+    # Находим минимум
+    min_idx = np.argmin(result['time_pred'])
+
+    # После минимума должно быть монотонное возрастание
+    if min_idx < len(ages) - 1:
+        after_min = result['time_pred'][min_idx:]
+        diffs = np.diff(after_min)
+
+        if not np.all(diffs >= -0.01):  # Небольшая толерантность
+            print(f"⚠️  Warning: time_pred not monotonic after age {ages[min_idx]}")
+
+    print(f"✓ Real data array prediction for race={race_id}, gender={gender}")
+    print(f"✓ Ages: {ages}")
+    print(f"✓ Times: {result['time_pred']}")
+    print(f"✓ Min time at age {ages[min_idx]}: {result['time_pred'][min_idx]:.2f} min")
+
+
+def test_predict_with_uncertainty_real_data_both_genders(model=None) -> None:
+    """
+    Интеграционный тест: проверка для обоих полов.
+
+    Проверяет что прогноз работает для M и F.
+    """
+
+    if model is None:
+        model = _real_data_build_model()
+
+    # Находим трассу которая есть для обоих полов
+    race_id = None
+    for rid in model.trace_references["race_id"].unique():
+        refs_for_race = model.trace_references[model.trace_references["race_id"] == rid]
+        if set(refs_for_race["gender"]) >= {"M", "F"}:
+            race_id = rid
+            break
+
+    if race_id is None:
+        print("No race with both genders, skipping test")
+        return
+
+    # ═══════════════════════════════════════════════════════════
+    # Делаем прогноз для обоих полов
+    # ═══════════════════════════════════════════════════════════
+
+    results = {}
+    for gender in ["M", "F"]:
+        results[gender] = model.predict_with_uncertainty(
+            race_id=race_id,
+            gender=gender,
+            age=40.0,
+            year=2025,
+            confidence=0.95,
+            method="analytical"
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    # Проверки
+    # ═══════════════════════════════════════════════════════════
+
+    # Оба результата должны быть валидными
+    for gender in ["M", "F"]:
+        result = results[gender]
+
+        if not np.isfinite(result['time_pred']):
+            raise RuntimeError(f"Real data: time_pred for gender={gender} is not finite")
+
+        if not (result['time_lower'] < result['time_pred'] < result['time_upper']):
+            raise RuntimeError(f"Real data: Interval invalid for gender={gender}")
+
+    # Обычно мужчины бегут быстрее женщин (но не всегда, так что только warning)
+    if results["M"]['time_pred'] > results["F"]['time_pred']:
+        print(f"Note: Male time ({results['M']['time_pred']:.1f}) > "
+              f"Female time ({results['F']['time_pred']:.1f})")
+
+    print(f"✓ Real data both genders for race={race_id}")
+    print(f"✓ Male: {results['M']['time_pred']:.2f} min "
+          f"[{results['M']['time_lower']:.2f}, {results['M']['time_upper']:.2f}]")
+    print(f"✓ Female: {results['F']['time_pred']:.2f} min "
+          f"[{results['F']['time_lower']:.2f}, {results['F']['time_upper']:.2f}]")
+
+
+
 # ============================================================================
 # Точка входа
 # ============================================================================
@@ -1069,6 +1264,13 @@ def test_real_data() -> None:
          test_real_data_sigma2_use_is_computed),
         ("test_real_data_tau2_bar_with_missing_references",
          test_real_data_tau2_bar_with_missing_references),
+
+        ("test_predict_with_uncertainty_real_data_scalar",
+         test_predict_with_uncertainty_real_data_scalar),
+        ("test_predict_with_uncertainty_real_data_array",
+         test_predict_with_uncertainty_real_data_array),
+        ("test_predict_with_uncertainty_real_data_both_genders",
+         test_predict_with_uncertainty_real_data_both_genders),
     ]
 
     for test_name, test_fn in tests:

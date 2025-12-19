@@ -240,8 +240,8 @@ class TraceReferenceBuilder:
             return None
 
         # Bootstrap для оценки std эталона
-        reference_var = self._bootstrap_reference_variance(times)
-        reference_std = float(np.sqrt(reference_var))
+        reference_variance = self._bootstrap_reference_variance(times)
+        reference_std = float(np.sqrt(reference_variance))
 
         return {
             "race_id": race_id_value,
@@ -249,6 +249,7 @@ class TraceReferenceBuilder:
             "reference_time": float(reference_time),
             "reference_log": float(np.log(reference_time)),
             "reference_std": reference_std,
+            "reference_variance": float(reference_variance),
             "n_total": int(group_size),
             "n_used": int(used_count),
         }

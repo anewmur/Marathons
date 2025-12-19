@@ -46,7 +46,7 @@ age_spline_model:
   sigma2_floor: 1.0e-8         # Минимальная дисперсия для численной стабильности
 
 
-dumping_info: false
+dumping_info: true
 path_for_outputs: 'C:\Users\andre\github\Marathons\test_outputs'
 
 

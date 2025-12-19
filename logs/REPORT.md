@@ -215,7 +215,7 @@ n_total
 
 ```python
 from logging_setup import easy_logging
-from main import MarathonModel
+from MarathonAgeModel import MarathonModel
 
 # Включить логирование
 easy_logging(True)
