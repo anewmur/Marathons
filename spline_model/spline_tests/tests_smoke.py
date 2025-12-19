@@ -9,6 +9,7 @@ from spline_model.spline_tests.test_predict import test_predict
 from spline_model.spline_tests.test_reml import test_reml
 from spline_model.spline_tests.test_spline import test_spline
 from spline_model.spline_tests.test_real_data import test_real_data
+from spline_model.spline_tests.test_compute_tau2_bar import test_compute_tau2_bar
 
 class _OnlyLevelFilter(logging.Filter):
     def __init__(self, level: int) -> None:
@@ -62,6 +63,7 @@ def main() -> None:
         ("test_predict", test_predict),
         ('test_reml', test_reml),
         ('test_predict_Log_time', test_predict_log_time),
+        ('test_compute_tau2_bar', test_compute_tau2_bar),
 
         # test real_data
 

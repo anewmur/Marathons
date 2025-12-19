@@ -418,7 +418,7 @@ def test_real_data_fit_gender_runs_and_preserves_centering(model=None) -> None:
     Проверяет:
     - модель создаётся
     - coef_beta конечна
-    - A @ beta ≈ 0 (центрирование h(0)=0, h'(0)=0 через ограничения)
+    -  beta (центрирование h(0)=0, h'(0)=0 через ограничения)
     """
     if model is None:
         model = _real_data_build_model()
@@ -426,8 +426,14 @@ def test_real_data_fit_gender_runs_and_preserves_centering(model=None) -> None:
 
     df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
 
+    trace_references = getattr(model, "trace_references", None)
     fitter = AgeSplineFitter(config=model.config)
-    fitted = fitter.fit_gender(gender_df=df_gender, gender="M")
+
+    fitted = fitter.fit_gender(
+        gender_df=df_gender,
+        gender="M",
+        trace_references=trace_references
+    )
 
     beta_series = fitted.coef_beta
     beta = beta_series.to_numpy(dtype=float)
@@ -474,19 +480,19 @@ def test_real_data_train_frame_has_Z(model=None) -> None:
 
 def _real_data_make_gender_fit_frame(train_frame: pd.DataFrame, gender: str) -> pd.DataFrame:
     """
-    Собирает минимальный фрейм для fit_gender: gender, age, z.
+    Собирает минимальный фрейм для fit_gender: gender, age, Z, race_id.
 
-    Контракт: колонка Z ОБЯЗАНА существовать в train_frame.
-    Если её нет, это ошибка пайплайна (нужно чинить код, а не тест).
+    Контракт: колонки Z и race_id ОБЯЗАНЫ существовать в train_frame.
+    race_id нужен для вычисления tau2_bar.
     """
-    required_columns = ["gender", "age", "Z"]
+    required_columns = ["gender", "age", "Z", "race_id"]  # ✅ ДОБАВЛЕН race_id
     missing_columns = [col for col in required_columns if col not in train_frame.columns]
     if missing_columns:
         raise RuntimeError(f"real_data: train_frame missing columns: {missing_columns}")
 
     df_gender = train_frame.loc[
         train_frame["gender"].astype(str) == str(gender),
-        ["gender", "age", "Z"],
+        ["gender", "age", "Z", "race_id"],  # ✅ ДОБАВЛЕН race_id
     ].copy()
 
     if df_gender.empty:
@@ -499,7 +505,6 @@ def _real_data_make_gender_fit_frame(train_frame: pd.DataFrame, gender: str) -> 
         raise RuntimeError("real_data: Z contains non-finite values")
 
     return df_gender
-
 def test_real_data_predict_h_at_age_center_is_near_zero(model=None) -> None:
     """
     Проверяет контракт центрирования на реальных данных: h(age_center) ≈ 0.
@@ -773,8 +778,10 @@ def test_real_data_fit_both_genders(model=None) -> None:
     z_frame["age"] = z_frame["age"].astype(float)
     z_frame["Z"] = z_frame["Z"].astype(float)
 
+    trace_references = getattr(model, "trace_references", None)
     fitter = AgeSplineFitter(config=model.config)
-    models = fitter.fit(z_frame)
+
+    models = fitter.fit(z_frame, trace_references=trace_references)
 
     if not isinstance(models, dict):
         raise RuntimeError("fit() should return dict")
@@ -847,7 +854,12 @@ def _real_data_pick_predict_case(model: MarathonModel) -> dict[str, Any]:
     raise RuntimeError("real_data: could not pick a valid (race_id, gender) case")
 
 
-def test_real_data_predict_log_time_equals_reference_plus_h(model=None) -> None:
+def test_real_data_predict_log_time_equals_reference_plus_mean(model=None) -> None:
+    """
+       Интеграционный тест: проверяет что predict_log_time = reference_log + predict_mean.
+
+       predict_mean включает μ + γ*x + h(x), то есть полную возрастную модель.
+       """
     if model is None:
         model = _real_data_build_model()
 
@@ -871,8 +883,8 @@ def test_real_data_predict_log_time_equals_reference_plus_h(model=None) -> None:
         gender=gender,
         _year=year,
     )
-    h_value = age_models[gender].predict_h(age)
-    expected = float(reference_log) + float(h_value)
+    mean_value = age_models[gender].predict_mean(age)
+    expected = float(reference_log) + float(mean_value)
 
     predicted = model.predict_log_time(race_id=race_id, gender=gender, age=age, year=year)
     if not np.isfinite(float(predicted)):
@@ -892,8 +904,119 @@ def test_real_data_predict_log_time_equals_reference_plus_h(model=None) -> None:
         raise RuntimeError("real_data: predict_log_time(array) returned non-finite")
 
 
+def test_real_data_tau2_bar_is_computed(model=None) -> None:
+    """
+    Проверяет что tau2_bar вычисляется и имеет разумное значение.
+    """
+    if model is None:
+        model = _real_data_build_model()
+
+    age_models = getattr(model, "age_spline_models", None)
+    if age_models is None or len(age_models) == 0:
+        raise RuntimeError("real_data: age_spline_models is missing or empty")
+
+    for gender in ["M", "F"]:
+        if gender not in age_models:
+            continue
+
+        fitted_model = age_models[gender]
+        tau2_bar = float(getattr(fitted_model, "tau2_bar", float("nan")))
+
+        # Проверяем что tau2_bar конечен
+        if not np.isfinite(tau2_bar):
+            raise RuntimeError(f"real_data: tau2_bar for gender={gender} is not finite: {tau2_bar}")
+
+        # Проверяем что tau2_bar неотрицателен
+        if tau2_bar < 0.0:
+            raise RuntimeError(f"real_data: tau2_bar for gender={gender} is negative: {tau2_bar}")
+
+        logger.info(f"real_data tau2_bar: gender={gender}, tau2_bar={tau2_bar:.6f}")
 
 
+def test_real_data_sigma2_use_is_computed(model=None) -> None:
+    """
+    Проверяет что sigma2_use вычисляется правильно.
+
+    Контракт: sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+    """
+    if model is None:
+        model = _real_data_build_model()
+
+    age_models = getattr(model, "age_spline_models", None)
+    if age_models is None or len(age_models) == 0:
+        raise RuntimeError("real_data: age_spline_models is missing or empty")
+
+    config = model.config
+    sigma2_floor = float(config["age_spline_model"].get("sigma2_floor", 1e-8))
+
+    for gender in ["M", "F"]:
+        if gender not in age_models:
+            continue
+
+        fitted_model = age_models[gender]
+
+        sigma2_use = float(getattr(fitted_model, "sigma2_use", float("nan")))
+        sigma2_reml = float(getattr(fitted_model, "sigma2_reml", float("nan")))
+        tau2_bar = float(getattr(fitted_model, "tau2_bar", float("nan")))
+
+        # Проверяем что sigma2_use конечен
+        if not np.isfinite(sigma2_use):
+            raise RuntimeError(f"real_data: sigma2_use for gender={gender} is not finite: {sigma2_use}")
+
+        # Проверяем что sigma2_use >= sigma2_floor
+        if sigma2_use < sigma2_floor:
+            raise RuntimeError(
+                f"real_data: sigma2_use for gender={gender} is less than floor: "
+                f"sigma2_use={sigma2_use}, floor={sigma2_floor}"
+            )
+
+        # Проверяем контракт: sigma2_use = max(floor, sigma2_reml - tau2_bar)
+        expected_sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+
+        if abs(sigma2_use - expected_sigma2_use) > 1e-12:
+            raise RuntimeError(
+                f"real_data: sigma2_use contract violated for gender={gender}: "
+                f"sigma2_use={sigma2_use}, expected={expected_sigma2_use}, "
+                f"sigma2_reml={sigma2_reml}, tau2_bar={tau2_bar}, floor={sigma2_floor}"
+            )
+
+        logger.info(
+            f"real_data sigma2_use: gender={gender}, "
+            f"sigma2_reml={sigma2_reml:.6f}, tau2_bar={tau2_bar:.6f}, "
+            f"sigma2_use={sigma2_use:.6f}"
+        )
+
+
+def test_real_data_tau2_bar_with_missing_references(model=None) -> None:
+    """
+    Проверяет что модель работает когда trace_references=None.
+
+    В этом случае tau2_bar должен быть 0.0.
+    """
+    if model is None:
+        model = _real_data_build_model()
+
+    train_frame = _real_data_get_train_frame(model)
+    df_gender = _real_data_make_gender_fit_frame(train_frame=train_frame, gender="M")
+
+    # Обучаем без trace_references
+    fitter = AgeSplineFitter(config=model.config)
+    fitted_model = fitter.fit_gender(
+        gender_df=df_gender,
+        gender="M",
+        trace_references=None  # Явно передаём None
+    )
+
+    tau2_bar = float(getattr(fitted_model, "tau2_bar", float("nan")))
+
+    # Проверяем что tau2_bar = 0.0 когда нет reference_variance
+    if tau2_bar != 0.0:
+        raise RuntimeError(
+            f"real_data: tau2_bar should be 0.0 when trace_references=None, "
+            f"got {tau2_bar}"
+        )
+
+    logger.info("real_data tau2_bar with missing references: OK (tau2_bar=0.0)")
 # ============================================================================
 # Точка входа
 # ============================================================================
@@ -937,8 +1060,15 @@ def test_real_data() -> None:
         ("test_real_data_fit_report_contains_required_fields",
          test_real_data_fit_report_contains_required_fields),
 
-        ('test_real_data_predict_log_time_equals_reference_plus_h',
-         test_real_data_predict_log_time_equals_reference_plus_h)
+        ('test_real_data_predict_log_time_equals_reference_plus_mean',
+         test_real_data_predict_log_time_equals_reference_plus_mean),
+
+        ("test_real_data_tau2_bar_is_computed",
+         test_real_data_tau2_bar_is_computed),
+        ("test_real_data_sigma2_use_is_computed",
+         test_real_data_sigma2_use_is_computed),
+        ("test_real_data_tau2_bar_with_missing_references",
+         test_real_data_tau2_bar_with_missing_references),
     ]
 
     for test_name, test_fn in tests:

@@ -16,6 +16,7 @@ import logging
 
 from spline_model.build_centering_matrix import build_centering_matrix
 from spline_model.select_lambda_reml import select_lambda_reml
+from spline_model.compute_tau2_bar import compute_tau2_bar
 
 logger = logging.getLogger(__name__)
 
@@ -338,31 +339,6 @@ def solve_penalized_lsq_with_linear(
         "rss": rss,
     }
 
-def compute_tau2_bar(
-    gender_df: pd.DataFrame,
-    trace_references: pd.DataFrame,
-    gender: str
-) -> float:
-    """
-    Вычисление средней дисперсии эталона для пола.
-    
-    Args:
-        gender_df: Данные для пола с колонкой race_id
-        trace_references: Таблица с reference_variance по (race_id, gender)
-        gender: "M" или "F"
-    
-    Returns:
-        tau2_bar: Среднее по строкам gender_df
-    
-    Raises:
-        NotImplementedError: Будет реализовано в Этапе 5
-    
-    Примечание:
-        Если reference_variance недоступна, возвращает 0.0 с предупреждением.
-    """
-    raise NotImplementedError("compute_tau2_bar будет реализован в Этапе 5")
-
-
 def apply_winsor(
     z: np.ndarray,
     z_hat: np.ndarray,
@@ -482,6 +458,8 @@ class AgeSplineFitter:
 
         self.centering_tol = float(age_model.get("centering_tol", 1e-10))
 
+        self.sigma2_floor = float(age_model.get("sigma2_floor", 1e-8))
+
         logger.info(
             "AgeSplineFitter initialized: age_center=%s, age_scale=%s, degree=%s, lambda_method=%s",
             self.age_center,
@@ -490,7 +468,7 @@ class AgeSplineFitter:
             self.lambda_method,
         )
 
-    def fit(self, df: pd.DataFrame) -> dict[str, AgeSplineModel]:
+    def fit(self, df: pd.DataFrame, trace_references: pd.DataFrame | None = None) -> dict[str, AgeSplineModel]:
         """
        Строит модели возрастного сплайна по всем полам из df.
 
@@ -534,7 +512,9 @@ class AgeSplineFitter:
         order = {"M": 0, "F": 1}
         return sorted(genders, key=lambda item: (order.get(item, 99), item))
 
-    def fit_gender(self, gender_df: pd.DataFrame, gender: str) -> "AgeSplineModel":
+    def fit_gender(self, gender_df: pd.DataFrame,
+                   gender: str,
+                   trace_references: pd.DataFrame | None = None) -> "AgeSplineModel":
         """
         Обучить модель для одного пола через конвейер шагов.
 
@@ -569,6 +549,13 @@ class AgeSplineFitter:
             penalty_matrix_raw=penalty_matrix_raw,
         )
 
+        tau2_bar, sigma2_use = self._compute_dispersions(
+            gender_df=gender_df,
+            gender=gender,
+            trace_references=trace_references,
+            reml_terms=reml_terms,
+        )
+
         solution = solve_penalized_lsq_with_linear(
             b_raw=b_raw,
             x_std=x_std,
@@ -595,12 +582,47 @@ class AgeSplineFitter:
             coef_mu=coef_mu,
             coef_gamma=coef_gamma,
             beta=beta,
+            tau2_bar=tau2_bar,
+            sigma2_use=sigma2_use,
             lambda_value=lambda_value,
             age_range_actual=age_range_actual,
             sample_size=int(len(z_values)),
             reml_terms=reml_terms,
         )
         return model
+
+    def _compute_dispersions(
+            self,
+            gender_df: pd.DataFrame,
+            gender: str,
+            trace_references: pd.DataFrame | None,
+            reml_terms: dict[str, Any] | None,
+    ) -> tuple[float, float]:
+        """
+        Вычисляет tau2_bar и sigma2_use.
+
+        Returns:
+            (tau2_bar, sigma2_use): оба float >= 0
+        """
+        # 1. Вычисляем tau2_bar
+        tau2_bar = 0.0
+        if trace_references is not None and not trace_references.empty:
+            tau2_bar = compute_tau2_bar(
+                gender_df=gender_df,
+                trace_references=trace_references,
+                gender=gender,
+            )
+
+        # 2. Получаем sigma2_reml
+        sigma2_reml = 0.0
+        if reml_terms is not None and "sigma2_hat" in reml_terms:
+            sigma2_reml = float(reml_terms["sigma2_hat"])
+
+        # 3. Вычисляем sigma2_use
+        sigma2_floor = float(getattr(self, "sigma2_floor", 1e-8))
+        sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+
+        return float(tau2_bar), float(sigma2_use)
 
     def _validate_fit_input(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -613,12 +635,16 @@ class AgeSplineFitter:
         if missing_columns:
             raise ValueError(f"AgeSplineFitter.fit: missing columns: {missing_columns}")
 
+        columns_to_copy = required_columns.copy()
+        if "race_id" in df.columns:
+            columns_to_copy.append("race_id")
+
         if df.empty:
             raise ValueError("AgeSplineFitter.fit: df is empty")
 
-        work_df = df[required_columns].copy()
-        if work_df.isna().any().any():
-            na_share = work_df.isna().mean().to_dict()
+        work_df = df[columns_to_copy].copy()
+        if work_df[required_columns].isna().any().any():
+            na_share = work_df[required_columns].isna().mean().to_dict()
             raise ValueError(f"AgeSplineFitter.fit: NA in required columns: {na_share}")
 
         return work_df
@@ -800,6 +826,8 @@ class AgeSplineFitter:
             null_basis_C: np.ndarray,
             beta: np.ndarray,
             coef_mu: float,
+            tau2_bar: float,
+            sigma2_use: float,
             coef_gamma: float,
             lambda_value: float,
             age_range_actual: tuple[float, float],
@@ -902,8 +930,8 @@ class AgeSplineFitter:
             lambda_value=float(lambda_value),
             sigma2_reml=0.0 if report_sigma2 is None else float(report_sigma2),
             nu=3.0 if report_nu is None else float(report_nu),
-            tau2_bar=0.0,
-            sigma2_use=0.0,
+            tau2_bar=float(tau2_bar),
+            sigma2_use=float(sigma2_use),
 
 
             # Winsor

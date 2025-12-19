@@ -701,7 +701,7 @@ class MarathonModel:
         z_frame = build_z_frame(train_frame=train_frame, trace_references=self.trace_references)
 
         fitter = AgeSplineFitter(config=self.config)
-        self.age_spline_models = fitter.fit(z_frame)
+        self.age_spline_models = fitter.fit(z_frame, trace_references=self.trace_references)
 
         rows_out = len(train_frame)
         elapsed = time.time() - start_time
@@ -766,7 +766,8 @@ class MarathonModel:
     ) -> float | np.ndarray:
         """
         Полный прогноз лог-времени:
-        ln T_hat = ln R^{use}_{c,g}(year) + h_g(age).
+        ln T_hat = ln R^{use}_{c,g}(year) + m_g(age),
+        где m_g(age) = μ + γ*x + h(x).
 
         Input:
           - race_id: трасса
@@ -777,7 +778,7 @@ class MarathonModel:
           - скаляр или массив ln T_hat
         Does:
           - берёт ln R^{use} через get_reference_log
-          - добавляет возрастную поправку predict_h
+          - добавляет возрастную поправку predict_mean (учитывает μ, γ*x и h(x))
         """
         self._check_step("predict_log_time", ["build_trace_references"])
 
@@ -799,11 +800,11 @@ class MarathonModel:
             gender=gender_key,
             _year=int(year),
         )
-        h_value = age_spline_models[gender_key].predict_h(age)
+        mean_value = age_spline_models[gender_key].predict_mean(age)
 
-        if isinstance(h_value, np.ndarray):
-            return h_value + float(reference_log)
-        return float(reference_log) + float(h_value)
+        if isinstance(mean_value, np.ndarray):
+            return mean_value + float(reference_log)
+        return float(reference_log) + float(mean_value)
 
 
     # ------------------------------------------------------------------

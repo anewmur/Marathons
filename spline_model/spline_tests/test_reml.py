@@ -62,7 +62,12 @@ def test_fit_gender_with_lambda_method_reml_runs_and_returns_positive_lambda() -
     z_values = z_values + rng.normal(0.0, 0.25, size=len(ages))
 
     df = pd.DataFrame(
-        {"gender": ["M"] * len(ages), "age": ages.astype(float), "Z": z_values.astype(float)}
+        {
+            "gender": ["M"] * len(ages),
+            "age": ages.astype(float),
+            "Z": z_values.astype(float),
+            "race_id": ["synthetic_race"] * len(ages),
+        }
     )
 
     config = {
@@ -76,11 +81,12 @@ def test_fit_gender_with_lambda_method_reml_runs_and_returns_positive_lambda() -
             "lambda_method": "REML",
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
     fitter = AgeSplineFitter(config=config)
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     if not np.isfinite(float(model.lambda_value)):
         raise RuntimeError("model.lambda_value is not finite")

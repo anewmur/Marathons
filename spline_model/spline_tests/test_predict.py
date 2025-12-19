@@ -26,6 +26,7 @@ def test_predict_h_at_age_center_is_near_zero() -> None:
             "min_knot_gap": 0.2,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -41,7 +42,7 @@ def test_predict_h_at_age_center_is_near_zero() -> None:
         "Z": z_values.astype(float),
     })
 
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     # h(35) должен быть близок к 0
     h_at_center = model.predict_h(35.0)
@@ -67,6 +68,7 @@ def test_predict_h_returns_finite_across_age_range() -> None:
             "min_knot_gap": 0.2,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -81,7 +83,7 @@ def test_predict_h_returns_finite_across_age_range() -> None:
         "Z": z_values.astype(float),
     })
 
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     # Проверяем на сетке возрастов включая границы
     test_ages = np.array([18.0, 25.0, 35.0, 50.0, 65.0, 80.0])
@@ -111,6 +113,7 @@ def test_predict_h_scalar_vs_array_consistent() -> None:
             "min_knot_gap": 0.2,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -125,7 +128,7 @@ def test_predict_h_scalar_vs_array_consistent() -> None:
         "Z": z_values.astype(float),
     })
 
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     test_ages = [25.0, 35.0, 50.0]
 
@@ -158,6 +161,7 @@ def test_predict_h_clamps_age_outside_bounds() -> None:
             "min_knot_gap": 0.2,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -172,7 +176,7 @@ def test_predict_h_clamps_age_outside_bounds() -> None:
         "Z": z_values.astype(float),
     })
 
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     # Возраст ниже минимума должен давать то же что минимум
     h_below = model.predict_h(10.0)
@@ -187,85 +191,6 @@ def test_predict_h_clamps_age_outside_bounds() -> None:
 
     if abs(h_above - h_at_max) > 1e-12:
         raise RuntimeError(f"predict_h(100) should equal predict_h(80), diff={abs(h_above - h_at_max)}")
-
-
-# def test_predict_mean_equals_predict_h_when_mu_gamma_zero() -> None:
-#     """
-#     Проверяет что predict_mean = predict_h когда coef_mu=0 и coef_gamma=0.
-#     """
-#     config = {
-#         "preprocessing": {"age_center": 35.0, "age_scale": 10.0},
-#         "age_spline_model": {
-#             "age_min_global": 18.0,
-#             "age_max_global": 80.0,
-#             "degree": 3,
-#             "max_inner_knots": 6,
-#             "min_knot_gap": 0.2,
-#             "lambda_value": 1.0,
-#             "centering_tol": 1e-10,
-#         },
-#     }
-#
-#     fitter = AgeSplineFitter(config=config)
-#
-#     ages = np.linspace(20.0, 70.0, 400)
-#     z_values = 0.01 * (ages - 35.0)
-#
-#     df = pd.DataFrame({
-#         "gender": ["M"] * len(ages),
-#         "age": ages.astype(float),
-#         "Z": z_values.astype(float),
-#     })
-#
-#     model = fitter.fit_gender(gender_df=df, gender="M")
-#
-#     # Пока coef_mu и coef_gamma равны 0
-#     model_zero = AgeSplineModel(
-#         gender=model.gender,
-#
-#         age_center=float(model.age_center),
-#         age_scale=float(model.age_scale),
-#         x0=float(model.x0),
-#
-#         age_min_global=float(model.age_min_global),
-#         age_max_global=float(model.age_max_global),
-#         age_range_actual=(float(model.age_range_actual[0]), float(model.age_range_actual[1])),
-#
-#         degree=int(model.degree),
-#         knots_x=[float(value) for value in model.knots_x],
-#         basis_centering=dict(model.basis_centering),
-#
-#         coef_mu=0.0,
-#         coef_gamma=0.0,
-#         coef_beta=model.coef_beta.copy(),
-#
-#         lambda_value=float(model.lambda_value),
-#         sigma2_reml=float(model.sigma2_reml),
-#         tau2_bar=float(model.tau2_bar),
-#         sigma2_use=float(model.sigma2_use),
-#         nu=float(model.nu),
-#
-#         winsor_params=dict(model.winsor_params),
-#         fit_report=dict(model.fit_report),
-#     )
-#
-#     test_ages = np.array([25.0, 35.0, 50.0])
-#
-#     h_values = model_zero.predict_h(test_ages)
-#     m_values = model_zero.predict_mean(test_ages)
-#
-#     max_diff = float(np.max(np.abs(h_values - m_values)))
-#     if max_diff > 1e-12:
-#         raise RuntimeError(f"predict_mean should equal predict_h when mu=gamma=0, max_diff={max_diff}")
-#
-#     test_ages = np.array([25.0, 35.0, 50.0])
-#
-#     h_values = model.predict_h(test_ages)
-#     m_values = model.predict_mean(test_ages)
-#
-#     max_diff = float(np.max(np.abs(h_values - m_values)))
-#     if max_diff > 1e-12:
-#         raise RuntimeError(f"predict_mean should equal predict_h when mu=gamma=0, max_diff={max_diff}")
 
 
 def test_predict_mean_matches_mu_plus_gamma_x_plus_h() -> None:
@@ -283,6 +208,7 @@ def test_predict_mean_matches_mu_plus_gamma_x_plus_h() -> None:
             "lambda_value": 1.0,
             "lambda_method": "FIXED",
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -331,6 +257,7 @@ def test_fit_linear_recovers_gamma_when_lambda_is_huge() -> None:
             "lambda_value": 1e8,
             "lambda_method": "FIXED",
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -374,6 +301,7 @@ def test_design_row_returns_correct_structure() -> None:
             "min_knot_gap": 0.2,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 

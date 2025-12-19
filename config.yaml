@@ -42,8 +42,11 @@ age_spline_model:
   age_min_global: 18
   age_max_global: 80
 
-dumping_info: false
+  # Дисперсии
+  sigma2_floor: 1.0e-8         # Минимальная дисперсия для численной стабильности
 
+
+dumping_info: false
 path_for_outputs: 'C:\Users\andre\github\Marathons\test_outputs'
 
 

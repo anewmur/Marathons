@@ -1,5 +1,3 @@
-
-
 import numpy as np
 import pandas as pd
 
@@ -24,6 +22,7 @@ def test_fit_gender_produces_model_and_beta_is_finite() -> None:
             "min_knot_gap": 0.1,
             "lambda_value": 1.0,
             "centering_tol": 1e-10,
+            "sigma2_floor": 1e-8,
         },
     }
 
@@ -37,10 +36,12 @@ def test_fit_gender_produces_model_and_beta_is_finite() -> None:
             "gender": ["M"] * int(len(ages)),
             "age": ages.astype(float),
             "Z": z_values.astype(float),
+            "race_id": ["synthetic_race"] * int(len(ages)),
         }
     )
 
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    # trace_references=None для синтетических данных (tau2_bar будет 0.0)
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
 
     beta_series = model.coef_beta
     if not isinstance(beta_series, pd.Series):

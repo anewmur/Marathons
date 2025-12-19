@@ -246,7 +246,7 @@ def test_predict_h_at_age_center_is_near_zero() -> None:
     df = pd.DataFrame({...})
     
     # 2. Выполнение
-    model = fitter.fit_gender(gender_df=df, gender="M")
+    model = fitter.fit_gender(gender_df=df, gender="M", trace_references=None)
     h_at_center = model.predict_h(35.0)
     
     # 3. Проверка с raise RuntimeError (не assert!)
