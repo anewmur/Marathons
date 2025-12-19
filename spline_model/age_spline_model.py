@@ -90,6 +90,8 @@ class AgeSplineModel:
         # Отчет о подгонке
         fit_report: Словарь с диагностической информацией:
             - "n": int (число наблюдений)
+            -"coef_mu": float(coef_mu),
+            -"coef_gamma": float(coef_gamma),
             - "age_range_actual": tuple
             - "age_range_years": float
             - "knots_count_inner": int
@@ -132,6 +134,7 @@ class AgeSplineModel:
     coef_mu: float = 0.0
     coef_gamma: float = 0.0
     coef_beta: pd.Series = field(default_factory=lambda: pd.Series([], dtype=float))
+
     
     # Дисперсии
     lambda_value: float = 0.0

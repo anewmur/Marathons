@@ -275,132 +275,68 @@ def solve_penalized_lsq(
         "rss": rss,
     }
 
+def solve_penalized_lsq_with_linear(
+    b_raw: np.ndarray,
+    x_std: np.ndarray,
+    y: np.ndarray,
+    null_basis: np.ndarray,
+    penalty_matrix_raw: np.ndarray,
+    lambda_value: float,
+) -> dict[str, Any]:
+    """
+    Решает penalized LSQ для модели:
+        y = mu + gamma * x_std + B_raw * beta + eps,
+    где beta = C @ gamma_spline и штраф применяется только к spline-части.
 
-# def select_lambda_gcv(
-#     W: np.ndarray,
-#     z: np.ndarray,
-#     lambda_grid: np.ndarray,
-#     penalty_idx: list[int]
-# ) -> tuple[float, dict[str, Any]]:
-#     """
-#     Выбор λ по GCV (Generalized Cross-Validation).
-#
-#     Args:
-#         W: Дизайн-матрица (n, p)
-#         z: Целевая переменная (n,)
-#         lambda_grid: Сетка значений λ для перебора
-#         penalty_idx: Индексы столбцов для штрафа
-#
-#     Returns:
-#         Кортеж (best_lambda, info):
-#         - best_lambda: оптимальное значение λ
-#         - info: словарь с "gcv_values", "edf_values" и др.
-#
-#     Замечания по реализации:
-#     - Штраф задаётся как ridge только на подмножестве коэффициентов.
-#       Это сознательно: сейчас нам нужно надёжное и простое GCV для выбора λ.
-#       P-сплайн штраф D^T D живёт уровнем выше (в solve_penalized_lsq).
-#     - EDF считаем как trace(H), где H = W (W^T W + λP)^{-1} W^T.
-#       Не строим H явно: trace(H) = trace((W^T W + λP)^{-1} (W^T W)).
-#     - Критерий GCV: n * RSS / (n - EDF)^2.
-#     """
-#     W_array = np.asarray(W, dtype=float)
-#     z_array = np.asarray(z, dtype=float).reshape(-1)
-#     grid = np.asarray(lambda_grid, dtype=float).reshape(-1)
-#
-#     if W_array.ndim != 2:
-#         raise ValueError("select_lambda_gcv: W must be 2D")
-#     if z_array.ndim != 1:
-#         raise ValueError("select_lambda_gcv: z must be 1D")
-#     if W_array.shape[0] != z_array.shape[0]:
-#         raise ValueError("select_lambda_gcv: W row count must match z length")
-#     if grid.size == 0:
-#         raise ValueError("select_lambda_gcv: lambda_grid is empty")
-#     if not np.isfinite(W_array).all():
-#         raise ValueError("select_lambda_gcv: W contains non-finite values")
-#     if not np.isfinite(z_array).all():
-#         raise ValueError("select_lambda_gcv: z contains non-finite values")
-#     if not np.isfinite(grid).all():
-#         raise ValueError("select_lambda_gcv: lambda_grid contains non-finite values")
-#     if np.any(grid < 0.0):
-#         raise ValueError("select_lambda_gcv: lambda_grid must be >= 0")
-#
-#     n_obs = int(W_array.shape[0])
-#     param_count = int(W_array.shape[1])
-#     if n_obs <= 0:
-#         raise ValueError("select_lambda_gcv: n must be > 0")
-#     if param_count <= 0:
-#         raise ValueError("select_lambda_gcv: p must be > 0")
-#
-#     penalty_mask = np.zeros(param_count, dtype=float)
-#     for column_index in penalty_idx:
-#         if not isinstance(column_index, int):
-#             raise ValueError("select_lambda_gcv: penalty_idx must contain ints")
-#         if column_index < 0 or column_index >= param_count:
-#             raise ValueError(
-#                 "select_lambda_gcv: penalty_idx out of bounds "
-#                 f"(idx={column_index}, p={param_count})"
-#             )
-#         penalty_mask[column_index] = 1.0
-#
-#     penalty_matrix = np.diag(penalty_mask)
-#     wtw = W_array.T @ W_array
-#     wtz = W_array.T @ z_array
-#
-#     gcv_values: list[float] = []
-#     edf_values: list[float] = []
-#     rss_values: list[float] = []
-#
-#     best_lambda = float(grid[0])
-#     best_gcv = float("inf")
-#     best_beta: np.ndarray | None = None
-#
-#     for lambda_value in grid.tolist():
-#         lam = float(lambda_value)
-#
-#         system_matrix = wtw + lam * penalty_matrix
-#         beta = np.linalg.solve(system_matrix, wtz)
-#
-#         fitted = W_array @ beta
-#         residual = z_array - fitted
-#         rss = float(residual.T @ residual)
-#
-#         inverse_times_wtw = np.linalg.solve(system_matrix, wtw)
-#         edf = float(np.trace(inverse_times_wtw))
-#
-#         if edf < 0.0:
-#             edf = 0.0
-#         if edf > float(param_count):
-#             edf = float(param_count)
-#
-#         denom = float(n_obs - edf)
-#         if denom <= 0.0:
-#             gcv = float("inf")
-#         else:
-#             gcv = float(n_obs) * rss / (denom * denom)
-#
-#         gcv_values.append(gcv)
-#         edf_values.append(edf)
-#         rss_values.append(rss)
-#
-#         if gcv < best_gcv:
-#             best_gcv = gcv
-#             best_lambda = lam
-#             best_beta = beta
-#
-#     if best_beta is None:
-#         raise RuntimeError("select_lambda_gcv: failed to select lambda")
-#
-#     info: dict[str, Any] = {
-#         "lambda_grid": grid.copy(),
-#         "gcv_values": np.asarray(gcv_values, dtype=float),
-#         "edf_values": np.asarray(edf_values, dtype=float),
-#         "rss_values": np.asarray(rss_values, dtype=float),
-#         "best_gcv": float(best_gcv),
-#         "best_beta": np.asarray(best_beta, dtype=float),
-#     }
-#     return best_lambda, info
+    Возвращает:
+      mu, gamma_linear, gamma_spline, beta, fitted, rss
+    """
+    b_raw_array = np.asarray(b_raw, dtype=float)
+    x_std_array = np.asarray(x_std, dtype=float).reshape(-1)
+    y_array = np.asarray(y, dtype=float).reshape(-1)
+    null_basis_array = np.asarray(null_basis, dtype=float)
+    penalty_raw_array = np.asarray(penalty_matrix_raw, dtype=float)
 
+    row_count = int(b_raw_array.shape[0])
+    if x_std_array.shape[0] != row_count:
+        raise RuntimeError("solve_penalized_lsq_with_linear: x_std length mismatch")
+    if y_array.shape[0] != row_count:
+        raise RuntimeError("solve_penalized_lsq_with_linear: y length mismatch")
+
+    b_cent = b_raw_array @ null_basis_array
+    penalty_cent = null_basis_array.T @ penalty_raw_array @ null_basis_array
+
+    ones = np.ones(shape=(row_count, 1), dtype=float)
+    x_col = x_std_array.reshape(-1, 1)
+    design = np.concatenate([ones, x_col, b_cent], axis=1)
+
+    p_spline = np.asarray(penalty_cent, dtype=float)
+    p_size = int(p_spline.shape[0])
+    penalty_block = np.zeros(shape=(2 + p_size, 2 + p_size), dtype=float)
+    penalty_block[2:, 2:] = float(lambda_value) * p_spline
+
+    left_matrix = design.T @ design + penalty_block
+    right_vector = design.T @ y_array
+
+    theta = np.linalg.solve(left_matrix, right_vector)
+
+    mu = float(theta[0])
+    gamma_linear = float(theta[1])
+    gamma_spline = np.asarray(theta[2:], dtype=float)
+
+    beta = null_basis_array @ gamma_spline
+    fitted = mu + gamma_linear * x_std_array + (b_raw_array @ beta)
+    residual = y_array - fitted
+    rss = float(residual.T @ residual)
+
+    return {
+        "mu": mu,
+        "gamma_linear": gamma_linear,
+        "gamma_spline": gamma_spline,
+        "beta": beta,
+        "fitted": fitted,
+        "rss": rss,
+    }
 
 def compute_tau2_bar(
     gender_df: pd.DataFrame,
@@ -633,8 +569,9 @@ class AgeSplineFitter:
             penalty_matrix_raw=penalty_matrix_raw,
         )
 
-        solution = self._solve(
+        solution = solve_penalized_lsq_with_linear(
             b_raw=b_raw,
+            x_std=x_std,
             y=z_values,
             null_basis=null_basis_C,
             penalty_matrix_raw=penalty_matrix_raw,
@@ -642,6 +579,8 @@ class AgeSplineFitter:
         )
 
         beta = np.asarray(solution["beta"], dtype=float)
+        coef_mu = float(solution["mu"])
+        coef_gamma = float(solution["gamma_linear"])
 
         self._assert_constraints(constraints_matrix=constraints_matrix_A, beta=beta)
 
@@ -653,6 +592,8 @@ class AgeSplineFitter:
             degree=int(self.degree),
             constraints_matrix_A=constraints_matrix_A,
             null_basis_C=null_basis_C,
+            coef_mu=coef_mu,
+            coef_gamma=coef_gamma,
             beta=beta,
             lambda_value=lambda_value,
             age_range_actual=age_range_actual,
@@ -823,13 +764,15 @@ class AgeSplineFitter:
     @staticmethod
     def _solve(
             b_raw: np.ndarray,
+            x_std: np.ndarray,
             y: np.ndarray,
             null_basis: np.ndarray,
             penalty_matrix_raw: np.ndarray,
             lambda_value: float,
-    ) -> dict[str, np.ndarray]:
-        solution = solve_penalized_lsq(
+    ) -> dict[str, Any]:
+        solution = solve_penalized_lsq_with_linear(
             b_raw=b_raw,
+            x_std=x_std,
             y=y,
             null_basis=null_basis,
             penalty_matrix_raw=penalty_matrix_raw,
@@ -856,6 +799,8 @@ class AgeSplineFitter:
             constraints_matrix_A: np.ndarray,
             null_basis_C: np.ndarray,
             beta: np.ndarray,
+            coef_mu: float,
+            coef_gamma: float,
             lambda_value: float,
             age_range_actual: tuple[float, float],
             sample_size: int,
@@ -912,6 +857,8 @@ class AgeSplineFitter:
 
         fit_report = {
             "n": int(sample_size),
+            "coef_mu": float(coef_mu),
+            "coef_gamma": float(coef_gamma),
             "age_range_actual": (float(age_range_actual[0]), float(age_range_actual[1])),
             "age_range_years": float(age_range_actual[1] - age_range_actual[0]),
             "knots_count_inner": int(max(0, len(knots_list) - 2 * (int(degree) + 1))),
@@ -947,8 +894,8 @@ class AgeSplineFitter:
             basis_centering=basis_centering,
 
             # Коэффициенты
-            coef_mu=0.0,
-            coef_gamma=0.0,
+            coef_mu=float(coef_mu),
+            coef_gamma=float(coef_gamma),
             coef_beta=coef_beta,
 
             # Дисперсии

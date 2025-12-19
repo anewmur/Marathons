@@ -4241,3 +4241,64 @@ DMITRII|SOZONOV_1970_M1970  1  1      2   <NA>
 2025-12-18 19:59:44 | INFO     | spline_model.spline_tests.test_real_data | real_data fit both genders: M_beta_len=12 F_beta_len=13
 2025-12-18 19:59:44 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
 2025-12-18 19:59:44 | INFO     | spline_model.spline_tests.test_real_data | real_data fit_report: n=29450 K_raw=12 K_cent=10
+2025-12-18 20:05:58 | INFO     | root                 | === Логирование включено ===
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | fit_gender: gender=M, n=29450
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | fit_gender: gender=F, n=6755
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | AgeSplineFitter.fit: completed genders=['M', 'F'] in 0.042s
+2025-12-18 20:06:14 | DEBUG    | spline_model.spline_tests.test_real_data | spline degree: 3
+2025-12-18 20:06:14 | DEBUG    | spline_model.spline_tests.test_real_data | x_used_for_spline range: -1.7 4.5
+2025-12-18 20:06:14 | DEBUG    | spline_model.spline_tests.test_real_data | knots_x range: -1.7 4.5
+2025-12-18 20:06:14 | INFO     | spline_model.spline_tests.test_real_data | real_data build_raw_basis: shape=(36205, 12) elapsed_sec=0.007000446319580078
+2025-12-18 20:06:14 | INFO     | spline_model.spline_tests.test_real_data | real_data partition_of_unity max_abs_err: 2.220446049250313e-16
+2025-12-18 20:06:14 | INFO     | spline_model.spline_tests.test_real_data | real_data solve_penalized_lsq: rss=622636.8699299931 max_abs_constraint=5.329070518200751e-15
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:14 | INFO     | spline_model.spline_tests.test_real_data | real_data fit_gender: beta_len=12 max_abs_constraint=1.6653345369377348e-16
+2025-12-18 20:06:14 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=REML
+2025-12-18 20:06:15 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=REML
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h(age_center=35.0) = 4.163336342344337e-17
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h: ages=[18.0, 25.0, 35.0, 50.0, 65.0, 80.0] h_values=[0.37058770309740496, 0.3161753814812581, 4.163336342344337e-17, 0.3641751600443561, 0.41681149522844807, 0.5900478343941786]
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h clamp: OK
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h shape: h(30)=0.3647255880974632 h(50)=0.3641751600443561 h(70)=0.500083114220151
+2025-12-18 20:06:16 | WARNING  | spline_model.spline_tests.test_real_data | predict_h shape warning: h(50) <= h(30), форма может быть необычной
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | fit_gender: gender=M, n=29450
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | fit_gender: gender=F, n=6755
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter.fit: completed genders=['M', 'F'] in 0.031s
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data fit both genders: M_beta_len=12 F_beta_len=13
+2025-12-18 20:06:16 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-18 20:06:16 | INFO     | spline_model.spline_tests.test_real_data | real_data fit_report: n=29450 K_raw=12 K_cent=10
+2025-12-19 13:48:22 | INFO     | root                 | === Логирование включено ===
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | fit_gender: gender=M, n=29450
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | fit_gender: gender=F, n=6755
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | AgeSplineFitter.fit: completed genders=['M', 'F'] in 0.030s
+2025-12-19 13:48:36 | DEBUG    | spline_model.spline_tests.test_real_data | spline degree: 3
+2025-12-19 13:48:36 | DEBUG    | spline_model.spline_tests.test_real_data | x_used_for_spline range: -1.7 4.5
+2025-12-19 13:48:36 | DEBUG    | spline_model.spline_tests.test_real_data | knots_x range: -1.7 4.5
+2025-12-19 13:48:36 | INFO     | spline_model.spline_tests.test_real_data | real_data build_raw_basis: shape=(36205, 12) elapsed_sec=0.004999399185180664
+2025-12-19 13:48:36 | INFO     | spline_model.spline_tests.test_real_data | real_data partition_of_unity max_abs_err: 2.220446049250313e-16
+2025-12-19 13:48:36 | INFO     | spline_model.spline_tests.test_real_data | real_data solve_penalized_lsq: rss=622636.8699299931 max_abs_constraint=5.329070518200751e-15
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:36 | INFO     | spline_model.spline_tests.test_real_data | real_data fit_gender: beta_len=12 max_abs_constraint=9.540979117872439e-18
+2025-12-19 13:48:36 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=REML
+2025-12-19 13:48:37 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=REML
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h(age_center=35.0) = 5.854691731421724e-18
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h: ages=[18.0, 25.0, 35.0, 50.0, 65.0, 80.0] h_values=[0.10126253827103773, 0.017383181492263585, 5.637851296924623e-18, 0.04213875163047208, 0.15288711757017376, 0.4210230113866945]
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h clamp: OK
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data predict_h shape: h(30)=0.0038777356165400328 h(50)=0.04213875163047208 h(70)=0.2204160068904587
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | fit_gender: gender=M, n=29450
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | fit_gender: gender=F, n=6755
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter.fit: completed genders=['M', 'F'] in 0.030s
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data fit both genders: M_beta_len=12 F_beta_len=13
+2025-12-19 13:48:38 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=FIXED
+2025-12-19 13:48:38 | INFO     | spline_model.spline_tests.test_real_data | real_data fit_report: n=29450 K_raw=12 K_cent=10
