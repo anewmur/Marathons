@@ -253,7 +253,7 @@ class AgeSplineModel:
         x_std = (age_clamped - float(self.age_center)) / float(self.age_scale)
 
         # Сплайновая часть
-        h_values = self.predict_h(age_array)
+        h_values = self.predict_h(age_clamped)
         if is_scalar:
             h_values = np.atleast_1d(h_values)
 

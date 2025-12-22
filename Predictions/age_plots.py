@@ -1,6 +1,8 @@
 import math
 import numpy as np
 import matplotlib
+import pandas as pd
+
 try:
     matplotlib.use("TkAgg")
 except Exception:
@@ -10,23 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from MarathonAgeModel import MarathonModel
 
-def seconds_to_hhmmss(seconds_value: float) -> str:
-    if seconds_value is None:
-        return ""
-    if isinstance(seconds_value, float) and math.isnan(seconds_value):
-        return ""
-    if seconds_value <= 0:
-        return "00:00:00"
 
-    total_seconds = int(round(float(seconds_value)))
-    hours_value = total_seconds // 3600
-    minutes_value = (total_seconds % 3600) // 60
-    seconds_rest = total_seconds % 60
-    return f"{hours_value:02d}:{minutes_value:02d}:{seconds_rest:02d}"
-
-
-def hhmmss_tick(x_value: float, pos: int) -> str:
-    return seconds_to_hhmmss(x_value)
 
 
 def main() -> None:

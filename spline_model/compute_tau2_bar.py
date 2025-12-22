@@ -53,31 +53,6 @@ def compute_tau2_bar(
         - Если после merge все reference_variance = NA, возвращает 0.0
         - Логирует предупреждения в обоих случаях
         - Всегда возвращает конечное неотрицательное число
-    
-    Примеры:
-        >>> gender_df = pd.DataFrame({
-        ...     "race_id": ["R1", "R1", "R2", "R2"],
-        ...     "gender": ["M", "M", "M", "M"],
-        ...     "age": [30, 35, 30, 35],
-        ...     "Z": [0.1, 0.2, 0.15, 0.25]
-        ... })
-        >>> trace_references = pd.DataFrame({
-        ...     "race_id": ["R1", "R2"],
-        ...     "gender": ["M", "M"],
-        ...     "reference_variance": [0.001, 0.002]
-        ... })
-        >>> tau2_bar = compute_tau2_bar(gender_df, trace_references, "M")
-        >>> print(f"{tau2_bar:.4f}")
-        0.0015
-        
-        # Если reference_variance отсутствует:
-        >>> trace_references_no_var = pd.DataFrame({
-        ...     "race_id": ["R1", "R2"],
-        ...     "gender": ["M", "M"]
-        ... })
-        >>> tau2_bar = compute_tau2_bar(gender_df, trace_references_no_var, "M")
-        >>> print(tau2_bar)
-        0.0
     """
     # Проверка обязательных колонок в gender_df
     required_gender_cols = ["race_id", "gender"]

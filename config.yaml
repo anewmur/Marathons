@@ -38,12 +38,15 @@ age_spline_model:
   max_inner_knots: 10          # Максимум внутренних узлов
   min_knot_gap: 0.2            # Минимальный разрыв в x-шкале (= 2 года в age)
 
+  "lambda_method": reml  #  автоматическая оценка lambda и sigma2
+  lambda_value: 1.0
   # Глобальные границы возраста (для clamp при обучении)
   age_min_global: 18
   age_max_global: 80
 
   # Дисперсии
-  sigma2_floor: 1.0e-8         # Минимальная дисперсия для численной стабильности
+  sigma2_floor: 1.0e-8         # Минимальная дисперсия для численной
+  centering_tol: 1.0e-10
 
 
 dumping_info: true

@@ -483,14 +483,14 @@ class AgeSplineFitter:
 
         models: dict[str, AgeSplineModel] = {}
         for gender in genders:
-            gender_df = work_df.loc[work_df["gender"] == gender, ["gender", "age", "Z"]].copy()
+            gender_df = work_df.loc[work_df["gender"] == gender, ["gender", "age", "Z", "race_id"]].copy()
 
             rows_in_gender = int(len(gender_df))
             if rows_in_gender == 0:
                 raise RuntimeError(f"AgeSplineFitter.fit: empty gender slice for gender={gender}")
 
             logger.info("fit_gender: gender=%s, n=%d", gender, rows_in_gender)
-            models[gender] = self.fit_gender(gender_df=gender_df, gender=str(gender))
+            models[gender] = self.fit_gender(gender_df=gender_df, gender=str(gender), trace_references=trace_references)
 
         elapsed_sec = float(time.time() - start_time)
         logger.info(
@@ -544,6 +544,7 @@ class AgeSplineFitter:
 
         lambda_value, reml_terms = self._select_lambda_value(
             b_raw=b_raw,
+            x_std=x_std,
             y=z_values,
             null_basis=null_basis_C,
             penalty_matrix_raw=penalty_matrix_raw,
@@ -589,6 +590,67 @@ class AgeSplineFitter:
             sample_size=int(len(z_values)),
             reml_terms=reml_terms,
         )
+
+        # DEBUG: sigma2 consistency check for final assembled model
+        # Проверяем, что sigma2_use согласован с RSS/nu по фактическим остаткам этой модели на train.
+        nu_debug = None
+        sigma2_reml_debug = None
+        if isinstance(reml_terms, dict):
+            best_terms = reml_terms.get("best_terms")
+            if isinstance(best_terms, dict):
+                nu_debug = best_terms.get("nu")
+                sigma2_reml_debug = best_terms.get("sigma2_hat")
+            if nu_debug is None:
+                nu_debug = reml_terms.get("nu")
+            if sigma2_reml_debug is None:
+                sigma2_reml_debug = reml_terms.get("sigma2_hat")
+
+        if nu_debug is None:
+            raise RuntimeError("DEBUG_SIGMA2: cannot find nu in reml_terms")
+        nu_debug = float(nu_debug)
+
+        mean_train_debug = model.predict_mean(ages_raw)
+        if not isinstance(mean_train_debug, np.ndarray):
+            mean_train_debug = np.asarray([float(mean_train_debug)], dtype=float)
+
+        residual_debug = np.asarray(z_values, dtype=float).reshape(-1) - mean_train_debug.reshape(-1)
+        rss_debug = float(np.sum(residual_debug * residual_debug))
+        sigma2_from_rss_debug = rss_debug / nu_debug
+
+        nu_plus2 = nu_debug - 2.0
+        if nu_plus2 > 0.0:
+            sigma2_from_rss_plus2 = rss_debug / nu_plus2
+            print(f"  sigma2_from_rss_plus2=RSS/(nu-2): {sigma2_from_rss_plus2:.12f}")
+
+
+        print("DEBUG_SIGMA2_FINAL_MODEL:")
+        print(f"  n={int(len(z_values))}")
+        print(f"  nu(reml_terms)={nu_debug:.6f}")
+        print(f"  rss(final_model)={rss_debug:.6f}")
+        print(f"  sigma2_from_rss(final_model)=RSS/nu={sigma2_from_rss_debug:.12f}")
+        print(f"  sigma2_use(passed_to_model)={float(sigma2_use):.12f}")
+        if sigma2_reml_debug is not None:
+            print(f"  sigma2_hat(reml_terms)={float(sigma2_reml_debug):.12f}")
+
+        ratio_debug = float(sigma2_use) / float(sigma2_from_rss_debug)
+        print(f"  ratio sigma2_use / (RSS/nu) = {ratio_debug:.6f}")
+
+        # Жёсткий стоп, если расходится сильно. Порог можешь временно сделать шире.
+        if not (0.98 <= ratio_debug <= 1.02):
+            print(
+                "DEBUG_SIGMA2: mismatch between sigma2_use and RSS/nu for final model. "
+                f"sigma2_use={float(sigma2_use):.6f}, "
+                f"sigma2_from_rss={float(sigma2_from_rss_debug):.6f}, "
+                f"ratio={ratio_debug:.3f}"
+            )
+
+
+        if sigma2_reml_debug is not None:
+            print(f"  rss(reml_terms)={float(reml_terms.get('rss')):.6f}")
+            print(f"  nu(reml_terms)={float(reml_terms.get('nu')):.6f}")
+            print(f"  sigma2_hat(reml_terms)=rss/nu={float(reml_terms.get('sigma2_hat')):.12f}")
+
+
         return model
 
     def _compute_dispersions(
@@ -620,7 +682,8 @@ class AgeSplineFitter:
 
         # 3. Вычисляем sigma2_use
         sigma2_floor = float(getattr(self, "sigma2_floor", 1e-8))
-        sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+        # sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+        sigma2_use = max(sigma2_floor, sigma2_reml)
 
         return float(tau2_bar), float(sigma2_use)
 
@@ -750,6 +813,7 @@ class AgeSplineFitter:
     def _select_lambda_value(
             self,
             b_raw: np.ndarray,
+            x_std: np.ndarray,
             y: np.ndarray,
             null_basis: np.ndarray,
             penalty_matrix_raw: np.ndarray,
@@ -765,16 +829,32 @@ class AgeSplineFitter:
         if method == "REML":
             b_raw_array = np.asarray(b_raw, dtype=float)
             y_array = np.asarray(y, dtype=float).reshape(-1)
+            x_std_array = np.asarray(x_std, dtype=float).reshape(-1)
+
             C = np.asarray(null_basis, dtype=float)
             P_raw = np.asarray(penalty_matrix_raw, dtype=float)
 
-            W_cent = b_raw_array @ C
+            row_count = int(b_raw_array.shape[0])
+            if x_std_array.shape[0] != row_count:
+                raise RuntimeError("_select_lambda_value: x_std length mismatch")
+            if y_array.shape[0] != row_count:
+                raise RuntimeError("_select_lambda_value: y length mismatch")
+
+            b_cent = b_raw_array @ C
             P_cent = C.T @ P_raw @ C
 
+            ones = np.ones((row_count, 1), dtype=float)
+            x_col = x_std_array.reshape(-1, 1)
+            design = np.concatenate([ones, x_col, b_cent], axis=1)
+
+            p_size = int(P_cent.shape[0])
+            P_full = np.zeros((2 + p_size, 2 + p_size), dtype=float)
+            P_full[2:, 2:] = P_cent
+
             best_lambda, info = select_lambda_reml(
-                W=W_cent,
+                W=design,
                 y=y_array,
-                penalty_matrix=P_cent,
+                penalty_matrix=P_full,
             )
 
             best_terms = info.get("best_terms")

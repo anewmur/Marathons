@@ -11,6 +11,8 @@ import pandas as pd
 from scipy import stats
 
 from MarathonAgeModel import MarathonModel
+# Создаём простую age модель с известными параметрами
+from spline_model.age_spline_fit import AgeSplineFitter
 
 
 def test_predict_with_uncertainty_scalar_age_analytical() -> None:
@@ -34,9 +36,7 @@ def test_predict_with_uncertainty_scalar_age_analytical() -> None:
         "reference_variance": [0.01],
     })
     
-    # Создаём простую age модель с известными параметрами
-    from spline_model.age_spline_fit import AgeSplineFitter
-    
+
     config = {
         "preprocessing": {"age_center": 35.0, "age_scale": 10.0},
         "age_spline_model": {

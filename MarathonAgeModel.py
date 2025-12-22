@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
-
+from age_reference_builder import seconds_to_hhmmss
 import pandas as pd
 import numpy as np
 import yaml
@@ -16,10 +16,10 @@ from spline_model.z_frame import build_z_frame
 from utils.raw_filter import RawFilter
 import DataLoader.data_loader as data_loader_module
 from DataLoader.data_loader import DataLoader
-
+from spline_model.predict_with_uncertainty import predict_with_uncertainty
 from Preprocessor.preprocessor import Preprocessor
 from trace_reference_builder import TraceReferenceBuilder, save_trace_references_xlsx, get_reference_log
-from age_reference_builder import AgeReferenceBuilder, save_age_references_xlsx, format_seconds_to_hhmmss
+from age_reference_builder import AgeReferenceBuilder, save_age_references_xlsx
 
 from spline_model.age_spline_fit import AgeSplineFitter
 from spline_model.age_spline_model import AgeSplineModel
@@ -139,6 +139,17 @@ class MarathonModel:
             return {
                 "preprocessing": {"age_center": 35, "age_scale": 10},
                 "validation_year": {"year": 0},
+                "age_spline_model": {
+                    "age_min_global": 18,
+                    "age_max_global": 80,
+                    "degree": 3,
+                    "max_inner_knots": 10,
+                    "min_knot_gap": 0.2,
+                    "lambda_method": "reml",
+                    "lambda_value": 1.0,
+                    "centering_tol": 1e-10,
+                    "sigma2_floor": 1e-8,
+                },
             }
         with open(config_path, "r", encoding="utf-8") as file_handle:
             return yaml.safe_load(file_handle)
@@ -523,7 +534,7 @@ class MarathonModel:
         )
 
         self.trace_references["trace_references_h"] = (
-            format_seconds_to_hhmmss(self.trace_references["reference_time"]))
+            seconds_to_hhmmss(self.trace_references["reference_time"]))
 
         if self.dumping_info:
             output_path_file = Path( self.output_path, 'trace_references.xlsx')
@@ -633,7 +644,7 @@ class MarathonModel:
             ).reset_index(drop=True)
 
             table["age_median_var"] = table["age_median_std"] ** 2
-            table["age_median_time_h"] = format_seconds_to_hhmmss(table["age_median_time"])
+            table["age_median_time_h"] = seconds_to_hhmmss(table["age_median_time"])
 
             references_by_race[str(race_id_value)] = table
 
@@ -806,250 +817,6 @@ class MarathonModel:
             return mean_value + float(reference_log)
         return float(reference_log) + float(mean_value)
 
-    def predict_with_uncertainty(
-            self,
-            race_id: str,
-            gender: str,
-            age: float | np.ndarray,
-            year: int,
-            confidence: float = 0.95,
-            method: str = "analytical",
-            n_samples: int = 10000,
-    ) -> dict:
-        """
-        Прогноз времени забега с интервалом неопределённости.
-
-        Вычисляет точечный прогноз и доверительный интервал на основе
-        log-нормальной модели: ln(T) ~ N(μ_pred, sigma2_use).
-
-        Args:
-            race_id: Идентификатор трассы (например, "Белые ночи")
-            gender: Пол бегуна ("M" или "F")
-            age: Возраст бегуна (скаляр или массив)
-            year: Год забега
-            confidence: Уровень доверия для интервала (0 < confidence < 1)
-                       Например: 0.95 для 95% доверительного интервала
-            method: Метод вычисления интервала:
-                   - "analytical": через квантили нормального распределения (быстро)
-                   - "monte_carlo": через симуляцию (медленнее, но показывает распределение)
-            n_samples: Число симуляций для метода "monte_carlo"
-
-        Returns:
-            dict с ключами:
-                # Прогноз в натуральной шкале (минуты)
-                'time_pred': float | np.ndarray - точечный прогноз времени
-                'time_lower': float | np.ndarray - нижняя граница CI
-                'time_upper': float | np.ndarray - верхняя граница CI
-
-                # Прогноз в log-шкале
-                'log_pred': float | np.ndarray - ln(time_pred)
-                'log_lower': float | np.ndarray - ln(time_lower)
-                'log_upper': float | np.ndarray - ln(time_upper)
-
-                # Параметры неопределённости
-                'sigma': float - стандартное отклонение (sqrt(sigma2_use))
-                'sigma2': float - дисперсия (sigma2_use)
-                'confidence': float - уровень доверия
-
-                # Метаданные
-                'race_id': str
-                'gender': str
-                'age': float | np.ndarray
-                'year': int
-                'method': str
-
-                # Дополнительно для method="monte_carlo":
-                'samples': dict с ключами:
-                    'time_samples': np.ndarray - симуляции времени
-                    'log_samples': np.ndarray - симуляции log-времени
-                    'n_samples': int
-
-        Raises:
-            ValueError: если confidence не в (0, 1)
-            ValueError: если method не "analytical" или "monte_carlo"
-            KeyError: если race_id/gender не найдены
-            RuntimeError: если модель не обучена
-
-            - Интервалы в натуральной шкале асимметричны из-за экспоненты
-            - sigma2_use учитывает как вариабельность модели, так и эталонов
-            - Для массива возрастов sigma одинакова для всех возрастов
-            - Monte Carlo метод полезен для визуализации распределения
-        """
-
-        if not (0.0 < confidence < 1.0):
-            raise ValueError(
-                f"predict_with_uncertainty: confidence must be in (0, 1), got {confidence}"
-            )
-
-        method = method.lower()
-        if method not in ["analytical", "monte_carlo"]:
-            raise ValueError(
-                f"predict_with_uncertainty: method must be 'analytical' or 'monte_carlo', "
-                f"got '{method}'"
-            )
-
-        if method == "monte_carlo" and n_samples < 100:
-            raise ValueError(
-                f"predict_with_uncertainty: n_samples must be >= 100 for monte_carlo, "
-                f"got {n_samples}"
-            )
-
-        # ═══════════════════════════════════════════════════════════
-        # Получаем точечный прогноз в log-шкале
-        # ═══════════════════════════════════════════════════════════
-
-        log_pred = self.predict_log_time(
-            race_id=race_id,
-            gender=gender,
-            age=age,
-            year=year
-        )
-
-        # ═══════════════════════════════════════════════════════════
-        # Получаем дисперсию sigma2_use из модели
-        # ═══════════════════════════════════════════════════════════
-
-        gender_key = str(gender)
-        if gender_key not in self.age_spline_models:
-            raise KeyError(
-                f"predict_with_uncertainty: no age model for gender={gender_key}"
-            )
-
-        age_model = self.age_spline_models[gender_key]
-        sigma2 = float(age_model.sigma2_use)
-        sigma = float(np.sqrt(sigma2))
-
-        # Проверка что sigma конечна
-        if not np.isfinite(sigma):
-            raise RuntimeError(
-                f"predict_with_uncertainty: sigma is not finite (sigma2_use={sigma2})"
-            )
-
-        # ═══════════════════════════════════════════════════════════
-        # Вычисляем интервал выбранным методом
-        # ═══════════════════════════════════════════════════════════
-
-        result = {
-            'race_id': str(race_id),
-            'gender': gender_key,
-            'age': age if isinstance(age, (int, float)) else age.copy(),
-            'year': int(year),
-            'confidence': float(confidence),
-            'method': method,
-            'sigma': sigma,
-            'sigma2': sigma2,
-        }
-
-        if method == "analytical":
-            # ───────────────────────────────────────────────────────
-            # Analytical method: используем квантили нормального
-            # ───────────────────────────────────────────────────────
-
-            # Квантиль для двустороннего интервала
-            # Например, для 95% CI: alpha=0.05, z = 1.96
-            alpha = 1.0 - confidence
-            z_score = stats.norm.ppf(1.0 - alpha / 2.0)
-
-            # Интервал в log-шкале (симметричный)
-            log_lower = log_pred - z_score * sigma
-            log_upper = log_pred + z_score * sigma
-
-            # Преобразуем в натуральную шкалу (асимметричный)
-            time_pred = np.exp(log_pred)
-            time_lower = np.exp(log_lower)
-            time_upper = np.exp(log_upper)
-
-            result.update({
-                'time_pred': time_pred,
-                'time_lower': time_lower,
-                'time_upper': time_upper,
-                'log_pred': log_pred,
-                'log_lower': log_lower,
-                'log_upper': log_upper,
-            })
-
-        elif method == "monte_carlo":
-            # ───────────────────────────────────────────────────────
-            # Monte Carlo method: симулируем из нормального
-            # ───────────────────────────────────────────────────────
-
-            # Определяем является ли age скаляром или массивом
-            is_scalar = isinstance(age, (int, float)) or (
-                    isinstance(age, np.ndarray) and age.ndim == 0
-            )
-
-            if is_scalar:
-                # Для скаляра: симулируем n_samples значений
-                log_samples = np.random.normal(
-                    loc=float(log_pred),
-                    scale=sigma,
-                    size=n_samples
-                )
-
-                # Перцентили в log-шкале
-                alpha = 1.0 - confidence
-                log_lower = float(np.percentile(log_samples, alpha / 2.0 * 100))
-                log_upper = float(np.percentile(log_samples, (1.0 - alpha / 2.0) * 100))
-
-                # В натуральной шкале
-                time_samples = np.exp(log_samples)
-                time_lower = float(np.percentile(time_samples, alpha / 2.0 * 100))
-                time_upper = float(np.percentile(time_samples, (1.0 - alpha / 2.0) * 100))
-                time_pred = float(np.median(time_samples))
-
-                result.update({
-                    'time_pred': time_pred,
-                    'time_lower': time_lower,
-                    'time_upper': time_upper,
-                    'log_pred': float(log_pred),
-                    'log_lower': log_lower,
-                    'log_upper': log_upper,
-                    'samples': {
-                        'log_samples': log_samples,
-                        'time_samples': time_samples,
-                        'n_samples': n_samples,
-                    }
-                })
-
-            else:
-                # Для массива: симулируем для каждого возраста
-                age_array = np.asarray(age, dtype=float)
-                log_pred_array = np.asarray(log_pred, dtype=float)
-                n_ages = age_array.size
-
-                # Матрица симуляций: (n_ages, n_samples)
-                log_samples_matrix = np.random.normal(
-                    loc=log_pred_array[:, np.newaxis],
-                    scale=sigma,
-                    size=(n_ages, n_samples)
-                )
-
-                # Перцентили для каждого возраста
-                alpha = 1.0 - confidence
-                log_lower = np.percentile(log_samples_matrix, alpha / 2.0 * 100, axis=1)
-                log_upper = np.percentile(log_samples_matrix, (1.0 - alpha / 2.0) * 100, axis=1)
-
-                # В натуральной шкале
-                time_samples_matrix = np.exp(log_samples_matrix)
-                time_lower = np.percentile(time_samples_matrix, alpha / 2.0 * 100, axis=1)
-                time_upper = np.percentile(time_samples_matrix, (1.0 - alpha / 2.0) * 100, axis=1)
-                time_pred = np.median(time_samples_matrix, axis=1)
-
-                result.update({
-                    'time_pred': time_pred,
-                    'time_lower': time_lower,
-                    'time_upper': time_upper,
-                    'log_pred': log_pred_array,
-                    'log_lower': log_lower,
-                    'log_upper': log_upper,
-                    'samples': {
-                        'log_samples': log_samples_matrix,
-                        'time_samples': time_samples_matrix,
-                        'n_samples': n_samples,
-                    }
-                })
-
-        return result
 
     # ------------------------------------------------------------------
     # summary
@@ -1078,6 +845,16 @@ class MarathonModel:
         completed = sum(self._steps_completed.values())
         total = len(self._steps_completed)
         return f"MarathonModel(data_path='{self.data_path}', steps={completed}/{total})"
+
+    def predict_with_uncertainty(self, race_id, gender, age, year, confidence, method, n_samples=10000):
+        return predict_with_uncertainty(model=self,
+                                        race_id=race_id,
+                                        gender=gender,
+                                        age=age,
+                                        year=year,
+                                        confidence=confidence,
+                                        method=method,
+                                        n_samples=n_samples)
 
 
 if __name__ == "__main__":

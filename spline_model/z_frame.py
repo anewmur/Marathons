@@ -39,7 +39,7 @@ def build_z_frame(
     merged = merged.copy()
     merged["Z"] = merged["Y"].astype(float) - merged["reference_log"].astype(float)
 
-    keep_cols = ["gender", "age", "Z"]
+    keep_cols = ["gender", "age", "Z", "race_id"]
     if "x" in merged.columns:
         keep_cols.append("x")
 

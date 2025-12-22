@@ -44,24 +44,63 @@ def flatten_age_references(references_by_race: dict[str, pd.DataFrame]) -> pd.Da
         result = result.sort_values(sort_cols).reset_index(drop=True)
     return result
 
-def format_seconds_to_hhmmss(seconds_series: pd.Series) -> pd.Series:
-    seconds_int = pd.to_numeric(seconds_series, errors="coerce").round().astype("Int64")
 
-    hours = (seconds_int // 3600).astype("Int64")
-    minutes = ((seconds_int % 3600) // 60).astype("Int64")
-    seconds = (seconds_int % 60).astype("Int64")
+def seconds_to_hhmmss(seconds: float | np.ndarray | pd.Series) -> str | pd.Series:
+    """
+    Конвертирует секунды в формат HH:MM:SS.
 
-    hours_str = hours.astype("string").str.zfill(2)
-    minutes_str = minutes.astype("string").str.zfill(2)
-    seconds_str = seconds.astype("string").str.zfill(2)
+    Работает с:
+    - float/int (скаляр)
+    - np.ndarray (scalar или массив)
+    - pd.Series
 
-    return hours_str + ":" + minutes_str + ":" + seconds_str
+    Args:
+        seconds: Время в секундах
 
+    Returns:
+        Строка "HH:MM:SS" для скаляра или pd.Series для массива
+    """
+    # Конвертируем в numpy array для единообразной обработки
+    if isinstance(seconds, (int, float, np.integer, np.floating)):
+        # Скаляр
+        is_scalar = True
+        seconds_array = np.array([float(seconds)])
+    elif isinstance(seconds, np.ndarray):
+        if seconds.ndim == 0:
+            # Numpy scalar (0-мерный массив)
+            is_scalar = True
+            seconds_array = np.array([float(seconds)])
+        else:
+            # Массив
+            is_scalar = False
+            seconds_array = seconds.astype(float)
+    elif isinstance(seconds, pd.Series):
+        is_scalar = False
+        seconds_array = seconds.values.astype(float)
+    else:
+        raise TypeError(
+            f"Unsupported type for seconds: {type(seconds)}. "
+            f"Expected float, np.ndarray, or pd.Series"
+        )
 
-def to_hhmmss(seconds_value: float) -> str:
-    series = pd.Series([seconds_value])
-    return format_seconds_to_hhmmss(series).iloc[0]
+    # Конвертируем в целые секунды
+    seconds_int = np.round(seconds_array).astype(np.int64)
 
+    # Вычисляем компоненты
+    hours = seconds_int // 3600
+    minutes = (seconds_int % 3600) // 60
+    secs = seconds_int % 60
+
+    # Форматируем строки
+    formatted = [
+        f"{h:02d}:{m:02d}:{s:02d}"
+        for h, m, s in zip(hours, minutes, secs)
+    ]
+
+    if is_scalar:
+        return formatted[0]
+    else:
+        return pd.Series(formatted)
 def save_age_references_xlsx(
     references_by_race: dict[str, pd.DataFrame],
     output_path: str | Path,

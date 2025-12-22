@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from spline_model.age_spline_fit import AgeSplineFitter
-from spline_model.age_spline_model import AgeSplineModel
+
 
 
 def test_predict_h_at_age_center_is_near_zero() -> None:

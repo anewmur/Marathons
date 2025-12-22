@@ -176,6 +176,7 @@ class TraceReferenceBuilder:
                 - reference_time (R_{c,g} в секундах)
                 - reference_log (ln R_{c,g})
                 - reference_std (bootstrap std эталона)
+                - reference_variance (D(ln R))
                 - n_total (размер группы)
                 - n_used (использовано после top/trim)
 
@@ -239,8 +240,9 @@ class TraceReferenceBuilder:
             )
             return None
 
-        # Bootstrap для оценки std эталона
-        reference_variance = self._bootstrap_reference_variance(times)
+        # Bootstrap для оценки std эталона (в log-шкале!)
+        # reference_variance — это Var(ln R), reference_std — это Std(ln R)
+        reference_variance = float(self._bootstrap_reference_variance(times))
         reference_std = float(np.sqrt(reference_variance))
 
         return {
@@ -249,7 +251,7 @@ class TraceReferenceBuilder:
             "reference_time": float(reference_time),
             "reference_log": float(np.log(reference_time)),
             "reference_std": reference_std,
-            "reference_variance": float(reference_variance),
+            "reference_variance": reference_variance,
             "n_total": int(group_size),
             "n_used": int(used_count),
         }
@@ -305,6 +307,14 @@ class TraceReferenceBuilder:
 
         Генерирует все bootstrap-выборки разом для максимальной скорости.
         Для каждой выборки применяется тот же протокол top/trim/median.
+
+        ВАЖНО: Дисперсия вычисляется в LOG-ШКАЛЕ!
+        Это необходимо для согласованности с sigma2_reml, которая тоже в log-шкале.
+        Формула: sigma2_use = max(floor, sigma2_reml - tau2_bar)
+        где tau2_bar = mean(reference_variance) по трассам.
+
+        Если бы reference_variance была в секундах², а sigma2_reml в log-шкале,
+        то вычитание было бы бессмысленным (разные единицы измерения).
         """
         if self.bootstrap_samples <= 1:
             return 0.0
@@ -347,7 +357,16 @@ class TraceReferenceBuilder:
         # Медианы всех выборок — векторно по axis=1
         bootstrap_medians = np.median(all_trimmed, axis=1)
 
-        return float(np.var(bootstrap_medians, ddof=1))
+        # Фильтруем нулевые/отрицательные медианы перед логарифмом
+        bootstrap_medians = bootstrap_medians[bootstrap_medians > 0.0]
+        if bootstrap_medians.size < 2:
+            return 0.0
+
+        # КРИТИЧНО: переводим в log-шкалу перед вычислением дисперсии!
+        # Это обеспечивает согласованность с sigma2_reml (тоже в log-шкале)
+        bootstrap_log_medians = np.log(bootstrap_medians)
+
+        return float(np.var(bootstrap_log_medians, ddof=1))
 
     def _validate_dataframe(self, dataframe: pd.DataFrame) -> None:
         """Проверить входной DataFrame."""
@@ -366,6 +385,7 @@ class TraceReferenceBuilder:
             "reference_time",
             "reference_log",
             "reference_std",
+            "reference_variance",
             "n_total",
             "n_used",
         ])
