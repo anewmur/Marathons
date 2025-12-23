@@ -468,7 +468,10 @@ def test_predict_with_uncertainty_validates_inputs() -> None:
     
     try:
         model.predict_with_uncertainty(
-            race_id="R1", gender="M", age=40.0, year=2025,
+            race_id="R1",
+            gender="M",
+            age=40.0,
+            year=2025,
             confidence=1.5  # > 1
         )
         raise RuntimeError("Should have raised ValueError for confidence > 1")
@@ -478,7 +481,10 @@ def test_predict_with_uncertainty_validates_inputs() -> None:
     
     try:
         model.predict_with_uncertainty(
-            race_id="R1", gender="M", age=40.0, year=2025,
+            race_id="R1",
+            gender="M",
+            age=40.0,
+            year=2025,
             confidence=0.0  # <= 0
         )
         raise RuntimeError("Should have raised ValueError for confidence <= 0")

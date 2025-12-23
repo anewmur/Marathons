@@ -27,7 +27,7 @@ def predict_with_uncertainty(
     Прогноз времени забега с интервалом неопределённости.
 
     Модель: ln(T) ~ N(log_pred, sigma2_total), где
-    sigma2_total = sigma2_use + reference_variance(race_id, gender).
+    sigma2_total = sigma2_use + reference_variance.
 
     sigma2_use: остаточная дисперсия возрастной модели (один для пола)
     reference_variance: дисперсия эталона трассы (разный для каждой трассы)
@@ -64,6 +64,7 @@ def predict_with_uncertainty(
     # ═══════════════════════════════════════════════════════════
     # Валидация параметров
     # ═══════════════════════════════════════════════════════════
+
 
     if not (0.0 < float(confidence) < 1.0):
         raise ValueError(
@@ -117,12 +118,6 @@ def predict_with_uncertainty(
             f"predict_with_uncertainty: sigma2_use must be >= 0, got {sigma2_use}"
         )
 
-
-
-    # ═══════════════════════════════════════════════════════════
-    # Получаем reference_variance из trace_references
-    # ═══════════════════════════════════════════════════════════
-
     if not hasattr(model, "trace_references") or model.trace_references is None:
         raise RuntimeError(
             "predict_with_uncertainty: trace_references is not available"
@@ -174,10 +169,6 @@ def predict_with_uncertainty(
             f"(race_id={race_id}, gender={gender_key}, value={reference_variance})"
         )
 
-    # ═══════════════════════════════════════════════════════════
-    # КЛЮЧЕВОЕ: вычисляем ИТОГОВУЮ дисперсию
-    # ═══════════════════════════════════════════════════════════
-
     sigma2_total = float(sigma2_use + reference_variance)
     sigma = float(np.sqrt(sigma2_total))
 
@@ -203,7 +194,11 @@ def predict_with_uncertainty(
         # Компоненты дисперсии
         'sigma2_use': sigma2_use,
         'reference_variance': reference_variance,
+
+        # Итоговая дисперсия. Держим оба ключа ради обратной совместимости тестов.
         'sigma2_total': sigma2_total,
+        'sigma2': sigma2_total,
+
         'sigma': sigma,
     }
 

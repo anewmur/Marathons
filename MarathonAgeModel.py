@@ -846,7 +846,14 @@ class MarathonModel:
         total = len(self._steps_completed)
         return f"MarathonModel(data_path='{self.data_path}', steps={completed}/{total})"
 
-    def predict_with_uncertainty(self, race_id, gender, age, year, confidence, method, n_samples=10000):
+    def predict_with_uncertainty(self,  race_id: str,
+                                        gender: str,
+                                        age,
+                                        year: int,
+                                        confidence: float = 0.95,
+                                        method: str = "analytical",
+                                        n_samples: int = 10000,):
+
         return predict_with_uncertainty(model=self,
                                         race_id=race_id,
                                         gender=gender,

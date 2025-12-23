@@ -483,7 +483,11 @@ class AgeSplineFitter:
 
         models: dict[str, AgeSplineModel] = {}
         for gender in genders:
-            gender_df = work_df.loc[work_df["gender"] == gender, ["gender", "age", "Z", "race_id"]].copy()
+            cols = ["gender", "age", "Z"]
+            if "race_id" in work_df.columns:
+                cols.append("race_id")
+
+            gender_df = work_df.loc[work_df["gender"] == gender, cols].copy()
 
             rows_in_gender = int(len(gender_df))
             if rows_in_gender == 0:
@@ -591,65 +595,27 @@ class AgeSplineFitter:
             reml_terms=reml_terms,
         )
 
-        # DEBUG: sigma2 consistency check for final assembled model
-        # Проверяем, что sigma2_use согласован с RSS/nu по фактическим остаткам этой модели на train.
-        nu_debug = None
-        sigma2_reml_debug = None
         if isinstance(reml_terms, dict):
-            best_terms = reml_terms.get("best_terms")
-            if isinstance(best_terms, dict):
-                nu_debug = best_terms.get("nu")
-                sigma2_reml_debug = best_terms.get("sigma2_hat")
-            if nu_debug is None:
-                nu_debug = reml_terms.get("nu")
-            if sigma2_reml_debug is None:
-                sigma2_reml_debug = reml_terms.get("sigma2_hat")
+            nu_debug = reml_terms.get("nu")
+            sigma2_hat_debug = reml_terms.get("sigma2_hat")
 
-        if nu_debug is None:
-            raise RuntimeError("DEBUG_SIGMA2: cannot find nu in reml_terms")
-        nu_debug = float(nu_debug)
+            if nu_debug is not None and sigma2_hat_debug is not None:
+                nu_value = float(nu_debug)
 
-        mean_train_debug = model.predict_mean(ages_raw)
-        if not isinstance(mean_train_debug, np.ndarray):
-            mean_train_debug = np.asarray([float(mean_train_debug)], dtype=float)
+                mean_train_debug = model.predict_mean(ages_raw)
+                if not isinstance(mean_train_debug, np.ndarray):
+                    mean_train_debug = np.asarray([float(mean_train_debug)], dtype=float)
 
-        residual_debug = np.asarray(z_values, dtype=float).reshape(-1) - mean_train_debug.reshape(-1)
-        rss_debug = float(np.sum(residual_debug * residual_debug))
-        sigma2_from_rss_debug = rss_debug / nu_debug
+                residual_debug = np.asarray(z_values, dtype=float).reshape(-1) - mean_train_debug.reshape(-1)
+                rss_debug = float(np.sum(residual_debug * residual_debug))
+                sigma2_from_rss_debug = rss_debug / nu_value
 
-        nu_plus2 = nu_debug - 2.0
-        if nu_plus2 > 0.0:
-            sigma2_from_rss_plus2 = rss_debug / nu_plus2
-            print(f"  sigma2_from_rss_plus2=RSS/(nu-2): {sigma2_from_rss_plus2:.12f}")
-
-
-        print("DEBUG_SIGMA2_FINAL_MODEL:")
-        print(f"  n={int(len(z_values))}")
-        print(f"  nu(reml_terms)={nu_debug:.6f}")
-        print(f"  rss(final_model)={rss_debug:.6f}")
-        print(f"  sigma2_from_rss(final_model)=RSS/nu={sigma2_from_rss_debug:.12f}")
-        print(f"  sigma2_use(passed_to_model)={float(sigma2_use):.12f}")
-        if sigma2_reml_debug is not None:
-            print(f"  sigma2_hat(reml_terms)={float(sigma2_reml_debug):.12f}")
-
-        ratio_debug = float(sigma2_use) / float(sigma2_from_rss_debug)
-        print(f"  ratio sigma2_use / (RSS/nu) = {ratio_debug:.6f}")
-
-        # Жёсткий стоп, если расходится сильно. Порог можешь временно сделать шире.
-        if not (0.98 <= ratio_debug <= 1.02):
-            print(
-                "DEBUG_SIGMA2: mismatch between sigma2_use and RSS/nu for final model. "
-                f"sigma2_use={float(sigma2_use):.6f}, "
-                f"sigma2_from_rss={float(sigma2_from_rss_debug):.6f}, "
-                f"ratio={ratio_debug:.3f}"
-            )
-
-
-        if sigma2_reml_debug is not None:
-            print(f"  rss(reml_terms)={float(reml_terms.get('rss')):.6f}")
-            print(f"  nu(reml_terms)={float(reml_terms.get('nu')):.6f}")
-            print(f"  sigma2_hat(reml_terms)=rss/nu={float(reml_terms.get('sigma2_hat')):.12f}")
-
+                sigma2_hat_value = float(sigma2_hat_debug)
+                ratio_hat = (
+                    sigma2_hat_value / sigma2_from_rss_debug
+                    if sigma2_from_rss_debug > 0.0
+                    else float("nan")
+                )
 
         return model
 
@@ -668,7 +634,12 @@ class AgeSplineFitter:
         """
         # 1. Вычисляем tau2_bar
         tau2_bar = 0.0
-        if trace_references is not None and not trace_references.empty:
+        can_compute_tau2 = (
+                trace_references is not None
+                and not trace_references.empty
+                and "race_id" in gender_df.columns
+        )
+        if can_compute_tau2:
             tau2_bar = compute_tau2_bar(
                 gender_df=gender_df,
                 trace_references=trace_references,
@@ -682,8 +653,8 @@ class AgeSplineFitter:
 
         # 3. Вычисляем sigma2_use
         sigma2_floor = float(getattr(self, "sigma2_floor", 1e-8))
-        # sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
-        sigma2_use = max(sigma2_floor, sigma2_reml)
+        sigma2_use = max(sigma2_floor, sigma2_reml - tau2_bar)
+
 
         return float(tau2_bar), float(sigma2_use)
 

@@ -12,6 +12,7 @@ from spline_model.age_spline_fit import build_raw_basis
 from spline_model.build_centering_matrix import build_centering_matrix
 from spline_model.age_spline_fit import build_second_difference_matrix
 from spline_model.age_spline_fit import solve_penalized_lsq
+from spline_model.spline_tests import test_predict_uncertainty_real_data as test_module
 from trace_reference_builder import get_reference_log
 
 logger = logging.getLogger(__name__)
@@ -1072,8 +1073,11 @@ def test_predict_with_uncertainty_real_data_scalar(model=None) -> None:
 
     # 3. Разумные значения (time должно быть в разумных пределах для марафона)
     # Например, 2-6 часов = 120-360 минут
-    if not (120.0 < result['time_pred'] < 360.0):
-        print(f"Warning: time_pred={result['time_pred']:.1f} is outside reasonable range")
+    lower_sec = 2.0 * 3600.0  # 2 часа
+    upper_sec = 6.0 * 3600.0  # 6 часов
+
+    if not (lower_sec < result["time_pred"] < upper_sec):
+        print(f"Warning: time_pred={result['time_pred']:.1f} sec is outside reasonable range")
 
     # 4. Интервал не должен быть слишком широким (например, не более 2х от pred)
     width = result['time_upper'] - result['time_lower']
@@ -1081,8 +1085,8 @@ def test_predict_with_uncertainty_real_data_scalar(model=None) -> None:
         print(f"Warning: interval width={width:.1f} is very large")
 
     print(f"✓ Real data prediction for race={race_id}, gender={gender}")
-    print(f"✓ time_pred: {result['time_pred']:.2f} min")
-    print(f"✓ 95% CI: [{result['time_lower']:.2f}, {result['time_upper']:.2f}] min")
+    print(f"✓ time_pred: {result['time_pred']:.2f} sec")
+    print(f"✓ 95% CI: [{result['time_lower']:.2f}, {result['time_upper']:.2f}] sec")
     print(f"✓ sigma: {result['sigma']:.4f}")
 
 
@@ -1145,7 +1149,7 @@ def test_predict_with_uncertainty_real_data_array(model=None) -> None:
     print(f"✓ Real data array prediction for race={race_id}, gender={gender}")
     print(f"✓ Ages: {ages}")
     print(f"✓ Times: {result['time_pred']}")
-    print(f"✓ Min time at age {ages[min_idx]}: {result['time_pred'][min_idx]:.2f} min")
+    print(f"✓ Min time at age {ages[min_idx]}: {result['time_pred'][min_idx]:.2f} sec")
 
 
 def test_predict_with_uncertainty_real_data_both_genders(model=None) -> None:
@@ -1205,9 +1209,9 @@ def test_predict_with_uncertainty_real_data_both_genders(model=None) -> None:
               f"Female time ({results['F']['time_pred']:.1f})")
 
     print(f"✓ Real data both genders for race={race_id}")
-    print(f"✓ Male: {results['M']['time_pred']:.2f} min "
+    print(f"✓ Male: {results['M']['time_pred']:.2f} sec "
           f"[{results['M']['time_lower']:.2f}, {results['M']['time_upper']:.2f}]")
-    print(f"✓ Female: {results['F']['time_pred']:.2f} min "
+    print(f"✓ Female: {results['F']['time_pred']:.2f} sec "
           f"[{results['F']['time_lower']:.2f}, {results['F']['time_upper']:.2f}]")
 
 
@@ -1271,6 +1275,7 @@ def test_real_data() -> None:
          test_predict_with_uncertainty_real_data_array),
         ("test_predict_with_uncertainty_real_data_both_genders",
          test_predict_with_uncertainty_real_data_both_genders),
+        ("test_predict_uncertainty_real_data", test_module.run_test_predict_uncertainty_real_data),
     ]
 
     for test_name, test_fn in tests:
