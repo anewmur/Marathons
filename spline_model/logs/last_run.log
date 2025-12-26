@@ -4555,3 +4555,74 @@ DMITRII|SOZONOV_1970_M1970  1  1      2   <NA>
 2025-12-19 16:03:14 | INFO     | MarathonAgeModel     | add_row_id: rows 42443 → 42443, elapsed 0.02s
 2025-12-19 16:03:16 | INFO     | MarathonAgeModel     | preprocess: rows 42443 → 42357, elapsed 1.91s
 2025-12-19 16:03:16 | INFO     | MarathonAgeModel     | build_train_frame_loy: rows 42357 → 36205, elapsed 0.05s, validation_year=2025
+2025-12-24 16:43:30 | INFO     | root                 | === Логирование включено ===
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | DataLoader class: DataLoader.data_loader.DataLoader
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | DataLoader file: C:\Users\andre\github\Marathons\DataLoader\data_loader.py
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | DataLoader OUTPUT_COLUMNS: ['surname', 'name', 'race_id', 'year', 'gender', 'age', 'time_seconds', 'status', 'city', 'bib_number', 'distance_km']
+2025-12-24 16:43:30 | INFO     | DataLoader.data_loader | DataLoader: загружен кэш data_cache.parquet
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | df columns: ['surname', 'name', 'race_id', 'year', 'gender', 'age', 'time_seconds', 'status', 'city', 'bib_number', 'distance_km']
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | load_data: rows 0 → 53142, elapsed 0.07s
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | filter_raw: rows 53142 → 42443, elapsed 0.02s
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | validate_raw: rows 42443 → 42443, elapsed 0.02s
+2025-12-24 16:43:30 | INFO     | MarathonAgeModel     | add_row_id: rows 42443 → 42443, elapsed 0.01s
+2025-12-24 16:43:30 | INFO     | Preprocessor.preprocessor | validate_input_contract:, rows 42443 → 42443, dropped 0, elapsed 0.000s, status=ok
+2025-12-24 16:43:30 | INFO     | Preprocessor.preprocessor | ensure_optional_columns:, rows 42443 → 42443, dropped 0, elapsed 0.006s, added_city=False, added_bib_number=False, added_distance_km=False
+2025-12-24 16:43:30 | INFO     | Preprocessor.preprocessor | normalize_core_strings:, rows 42443 → 42443, dropped 0, elapsed 0.346s, null_city=4304
+2025-12-24 16:43:30 | INFO     | Preprocessor.preprocessor | build_person_base_key:, rows 42443 → 42443, dropped 0, elapsed 0.090s, nunique_ordered_key=23418, nunique_set_key=23239, swap_cases=42437
+2025-12-24 16:43:30 | INFO     | Preprocessor.preprocessor | compute_approx_birth_year:, rows 42443 → 42443, dropped 0, elapsed 0.015s, na_birth_year=0, unique_birth_years=73
+2025-12-24 16:43:31 | INFO     | Preprocessor.preprocessor | stabilize_birth_year:, rows 42443 → 42443, dropped 0, elapsed 0.339s, na_birth_year_stable=0, na_birth_cluster_id=0
+2025-12-24 16:43:31 | INFO     | Preprocessor.preprocessor | assign_runner_id:, rows 42443 → 42443, dropped 0, elapsed 0.081s, nunique_runner_id=25037, max_group_size=29, suspicious_multi_start_rows=216, mode=set_key_with_birth_year_stable_and_cluster
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | normalize_city_names:, rows 42443 → 42443, dropped 0, elapsed 1.006s, changed_rows=35573, unique_before=2878, unique_after=2104
+2025-12-24 16:43:32 | INFO     | utils.city_normalizer | dump_unrecognized_cities: dumped 200 cities to C:\Users\andre\github\Marathons\test_outputs\unrecognized_cities_top.txt (elapsed 0.006s)
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | compute_city_mode_per_runner:, rows 42443 → 42443, dropped 0, elapsed 0.055s, runners_with_single_city=21886, potential_fill_rows=35067
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | fill_city_within_runner:, rows 42443 → 42443, dropped 0, elapsed 0.067s, actual_filled_rows=2067, remaining_na_city=2245
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | split_runner_id_by_city_when_conflicted:, rows 42443 → 42443, dropped 0, elapsed 0.032s, changed_rows=5131, affected_runner_ids=1431
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | after_city_split: event_multi_rows=80
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | fix_gender_by_majority report saved: C:\Users\andre\github\Marathons\test_outputs\gender_fixes.txt
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | fix_gender_by_majority changed winners (top 30):
+                                    runner_id  F  M  total winner
+                 ALEKSANDR|TARASOV_1984_M1984  1  7      8      M
+ IVANOV|IVAN_1985_M1983__CITY_Санкт-Петербург  1  7      8      M
+                 ANDREI|OVCHARENKO_1980_M1980  1  4      5      M
+                     PAVEL|SMIRNOV_1982_M1982  1  4      5      M
+                  BELYAKOV|DMITRII_1985_M1985  1  3      4      M
+                ALEKSEI|TETYUSHKIN_1984_M1984  1  2      3      M
+ALMAZ|GALIAKHMETOV_1974_M1974__CITY_Волгоград  1  2      3      M
+                      DANIIL|DANIK_1982_M1982  1  2      3      M
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | fix_gender_by_majority removed ambiguous (top 30):
+                                     runner_id  F  M  total winner
+                    DMITRII|SOZONOV_1970_M1970  1  1      2   <NA>
+                     IRINA|LEBEDEVA_1985_M1985  1  1      2   <NA>
+                      MAKSIM|SINKIN_1983_M1983  1  1      2   <NA>
+MAMEDOV|VUSAL_1989_M1989__CITY_Санкт-Петербург  1  1      2   <NA>
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | fix_gender_by_majority:, rows 42443 → 42435, dropped 8, elapsed 0.183s, removed_rows=8, removed_runner_ids=4, changed_rows=8
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | deduplicate_strict:, rows 42435 → 42435, dropped 0, elapsed 0.029s, removed_rows=0, duplicate_groups=0, bib_fill_rate=1.000, bib_used=True, key_cols=runner_id|race_id|year|time_seconds|bib_number
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | drop_ambiguous_event_multi: leftover event_multi rows=6
+                          runner_id       race_id  year  bib_number  city  age  time_seconds
+19534  ALEKSANDR|KALININ_1982_M1981  Дорога жизни  2022        4735  <NA>   40       17460.0
+19583  ALEKSANDR|KALININ_1982_M1981  Дорога жизни  2022        3697  <NA>   39       17740.0
+18619      ANDREI|PETROV_1977_M1976  Дорога жизни  2022        4771  <NA>   45       13359.0
+19223      ANDREI|PETROV_1977_M1976  Дорога жизни  2022        5027  <NA>   45       15931.0
+18492      ANDREI|PETROV_1987_M1987  Дорога жизни  2022        4121  <NA>   34       12516.0
+19033      ANDREI|PETROV_1987_M1987  Дорога жизни  2022        4992  <NA>   34       15088.0
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | drop_ambiguous_event_multi:, rows 42435 → 42355, dropped 80, elapsed 0.108s, removed_rows=80, removed_ambiguous=74, removed_leftover=6, removed_share=0.001885
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | add_features:, rows 42355 → 42355, dropped 0, elapsed 0.021s, age_center=35.0, age_scale=10.0, age_min_global=18.0, age_max_global=80.0
+2025-12-24 16:43:32 | INFO     | Preprocessor.preprocessor | preprocess_total:, rows 42443 → 42355, dropped 88, elapsed 2.419s
+2025-12-24 16:43:32 | INFO     | MarathonAgeModel     | preprocess: rows 42443 → 42355, elapsed 2.42s
+2025-12-24 16:43:32 | INFO     | MarathonAgeModel     | build_train_frame_loy: rows 42355 → 36203, elapsed 0.08s, validation_year=2025
+2025-12-24 16:43:33 | INFO     | trace_reference_builder | ReferenceBuilder: построено 10 эталонов
+2025-12-24 16:43:33 | INFO     | MarathonAgeModel     | build_trace_references: rows 36203 → 10, elapsed 0.39s, groups=10
+2025-12-24 16:43:33 | INFO     | trace_reference_builder | Trace references saved: C:\Users\andre\github\Marathons\test_outputs\trace_references.xlsx, rows=10
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder config: min_group_size=10, bootstrap_samples=500, random_seed=456
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder: построено 93 возрастных медиан
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder: построено 92 возрастных медиан
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder: построено 89 возрастных медиан
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder: построено 52 возрастных медиан
+2025-12-24 16:43:44 | INFO     | age_reference_builder | AgeReferenceBuilder: построено 9 возрастных медиан
+2025-12-24 16:43:44 | INFO     | age_reference_builder | Age references saved: C:\Users\andre\github\Marathons\test_outputs\age_references.xlsx, rows=335
+2025-12-24 16:43:44 | INFO     | MarathonAgeModel     | build_age_references: rows 36203 → 335, elapsed 0.47s, races=5
+2025-12-24 16:43:44 | INFO     | spline_model.age_spline_fit | AgeSplineFitter initialized: age_center=35.0, age_scale=10.0, degree=3, lambda_method=REML
+2025-12-24 16:43:44 | INFO     | spline_model.age_spline_fit | fit_gender: gender=M, n=29448
+2025-12-24 16:43:45 | INFO     | spline_model.age_spline_fit | fit_gender: gender=F, n=6755
+2025-12-24 16:43:46 | INFO     | spline_model.age_spline_fit | AgeSplineFitter.fit: completed genders=['M', 'F'] in 1.489s
+2025-12-24 16:43:46 | INFO     | MarathonAgeModel     | fit_age_model: rows 42355 → 36203, elapsed 1.55s, validation_year=2025

@@ -1,8 +1,5 @@
 
 from __future__ import annotations
-
-import math
-
 import numpy as np
 import matplotlib
 import pandas as pd
@@ -21,6 +18,9 @@ def main(race_id = "Казанский марафон",
          gender = "M",
          age_target=40.0,
          year_target = 2025) -> None:
+
+    if year_target != 2025:
+        raise ValueError('Нельзя предсказывать распределение на год меньше 2025. Этот год есть в обучении')
 
     model = MarathonModel(
         data_path=r"C:\Users\andre\github\Marathons\Data",

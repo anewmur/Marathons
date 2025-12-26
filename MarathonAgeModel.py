@@ -82,6 +82,7 @@ class MarathonModel:
         self,
         data_path: str | Path,
         verbose: bool = True,
+        validation_year: int | None = None
     ) -> None:
         """
         Инициализирует модель.
@@ -95,7 +96,7 @@ class MarathonModel:
         self.dumping_info = self.config.get("dumping_info", {})
         self.output_path = self.config.get("path_for_outputs")
 
-        self.validation_year = int(self.config.get("validation_year")["year"])
+        self.validation_year = validation_year if validation_year is not None else int(self.config.get("validation_year")["year"])
 
         self._data_loader = DataLoader()
         logger.info("DataLoader class: %s.%s", self._data_loader.__class__.__module__,

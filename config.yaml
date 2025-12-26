@@ -49,7 +49,7 @@ age_spline_model:
   centering_tol: 1.0e-10
 
 
-dumping_info: true
+dumping_info: False
 path_for_outputs: 'C:\Users\andre\github\Marathons\test_outputs'
 
 

@@ -4,7 +4,6 @@ from MarathonAgeModel import MarathonModel
 from age_reference_builder import seconds_to_hhmmss
 
 from logging_setup import easy_logging
-import pandas as pd
 
 easy_logging(True)
 
